@@ -4,6 +4,15 @@ import { Workspace } from "./workspace.js";
 import { createFileTools } from "./fileTools.js";
 import { createCommandTools } from "./commandTools.js";
 import { createInspectTools } from "./inspectTools.js";
+import { createDeployTools } from "./deployTools.js";
+
+export interface ToolRegistryOptions {
+  /** Present only when both are set - enables the deploy_project tool. */
+  cloudflare?: {
+    apiToken?: string;
+    accountId?: string;
+  };
+}
 
 /**
  * Collects every tool the orchestrator can call. This is the ONLY layer
@@ -15,13 +24,27 @@ export class ToolRegistry {
   private readonly tools = new Map<string, ToolDefinition>();
   readonly workspace: Workspace;
 
-  constructor(workspaceRoot: string, log: Logger) {
+  constructor(workspaceRoot: string, log: Logger, options: ToolRegistryOptions = {}) {
     this.workspace = new Workspace(workspaceRoot);
     const all = [
       ...createFileTools(this.workspace, log.child("tool")),
       ...createCommandTools(this.workspace, log.child("tool")),
       ...createInspectTools(this.workspace, log.child("tool")),
     ];
+
+    const cfApiToken = options.cloudflare?.apiToken;
+    const cfAccountId = options.cloudflare?.accountId;
+    if (cfApiToken && cfAccountId) {
+      all.push(
+        ...createDeployTools(this.workspace, log.child("tool"), {
+          apiToken: cfApiToken,
+          accountId: cfAccountId,
+        })
+      );
+    } else {
+      log.debug("deploy_project tool not registered - Cloudflare credentials not configured");
+    }
+
     for (const t of all) this.tools.set(t.name, t);
   }
 
