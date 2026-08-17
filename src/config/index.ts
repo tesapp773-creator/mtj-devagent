@@ -1,0 +1,53 @@
+import "dotenv/config";
+import { z } from "zod";
+
+/**
+ * All runtime configuration comes from environment variables.
+ * No secrets are ever hardcoded here. If a required variable is
+ * missing, the process fails fast with a clear error instead of
+ * silently running with an undefined API key.
+ */
+const ConfigSchema = z.object({
+  LLM_BASE_URL: z.string().url().default("https://api.llmsrelay.com/v1"),
+  LLM_MODEL: z.string().min(1).default("claude-sonnet-4.6"),
+  LLM_API_KEY: z.string().min(1, "LLM_API_KEY is required and must be set as an environment variable"),
+  LLM_MAX_TOKENS: z.coerce.number().int().positive().default(4096),
+  LLM_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
+
+  AGENT_WORKSPACE_ROOT: z.string().min(1).default("./workspace"),
+  AGENT_MAX_LOOP_ITERATIONS: z.coerce.number().int().positive().default(8),
+
+  LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
+});
+
+export type AppConfig = z.infer<typeof ConfigSchema>;
+
+let cachedConfig: AppConfig | undefined;
+
+/**
+ * Loads and validates configuration from process.env.
+ * Throws a descriptive error if required values are missing/invalid.
+ * Cached after first successful load.
+ */
+export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
+  if (cachedConfig) return cachedConfig;
+
+  const result = ConfigSchema.safeParse(env);
+  if (!result.success) {
+    const issues = result.error.issues
+      .map((i) => `  - ${i.path.join(".")}: ${i.message}`)
+      .join("\n");
+    throw new Error(
+      `Invalid or missing configuration.\n${issues}\n\n` +
+        `Copy .env.example to .env and fill in real values (never commit .env).`
+    );
+  }
+
+  cachedConfig = result.data;
+  return cachedConfig;
+}
+
+/** For tests only: clears the cached config so it can be reloaded. */
+export function _resetConfigCache(): void {
+  cachedConfig = undefined;
+}
