@@ -18,6 +18,12 @@ const ConfigSchema = z.object({
   AGENT_MAX_LOOP_ITERATIONS: z.coerce.number().int().positive().default(8),
 
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
+
+  // Optional: only required if the deploy_project tool is used. Deployment
+  // capability is disabled (tool not registered) when either is missing -
+  // the agent still runs fine without them.
+  CLOUDFLARE_API_TOKEN: z.string().min(1).optional(),
+  CLOUDFLARE_ACCOUNT_ID: z.string().min(1).optional(),
 });
 
 export type AppConfig = z.infer<typeof ConfigSchema>;
