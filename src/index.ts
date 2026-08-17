@@ -8,16 +8,24 @@ async function main() {
   const config = loadConfig();
   const log = createLogger("mtj-devagent", config.LOG_LEVEL);
 
+  const deployEnabled = Boolean(config.CLOUDFLARE_API_TOKEN && config.CLOUDFLARE_ACCOUNT_ID);
+
   log.info("MTJ DevAgent starting", {
     model: config.LLM_MODEL,
     baseUrl: config.LLM_BASE_URL,
     workspaceRoot: config.AGENT_WORKSPACE_ROOT,
+    deployEnabled,
   });
 
-  const tools = new ToolRegistry(config.AGENT_WORKSPACE_ROOT, log);
+  const tools = new ToolRegistry(config.AGENT_WORKSPACE_ROOT, log, {
+    cloudflare: {
+      apiToken: config.CLOUDFLARE_API_TOKEN,
+      accountId: config.CLOUDFLARE_ACCOUNT_ID,
+    },
+  });
   await tools.workspace.ensureExists();
 
-  // Step 2+ will register specialist agents here, e.g.:
+  // Step 3+ will register specialist agents here, e.g.:
   // agents.register(createQaAgent(...));
   const agents = new AgentRegistry();
 
