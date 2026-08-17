@@ -35,7 +35,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const result = ConfigSchema.safeParse(env);
   if (!result.success) {
     const issues = result.error.issues
-      .map((i) => `  - ${i.path.join(".")}: ${i.message}`)
+      .map((i: z.ZodIssue) => `  - ${i.path.join(".")}: ${i.message}`)
       .join("\n");
     throw new Error(
       `Invalid or missing configuration.\n${issues}\n\n` +
