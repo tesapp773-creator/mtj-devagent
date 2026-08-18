@@ -12,7 +12,12 @@ const ConfigSchema = z.object({
   LLM_MODEL: z.string().min(1).default("claude-sonnet-4.6"),
   LLM_API_KEY: z.string().min(1, "LLM_API_KEY is required and must be set as an environment variable"),
   LLM_MAX_TOKENS: z.coerce.number().int().positive().default(4096),
-  LLM_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
+  // Per-attempt timeout. Lowered from 120s to 60s: LlmClient now retries up to
+  // 3 times on transient failures (see src/llm/client.ts), so the OLD 120s value
+  // could have meant up to ~6 minutes of total waiting in the worst case - which
+  // is the exact silent-hang behavior that caused real confusion in a live run.
+  // 60s per attempt keeps the worst-case total bounded to a few minutes.
+  LLM_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
 
   AGENT_WORKSPACE_ROOT: z.string().min(1).default("./workspace"),
   // History: 8 -> 16 -> 24. A real E2E run at 16 got all the way through a genuine
