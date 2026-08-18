@@ -15,11 +15,11 @@ const ConfigSchema = z.object({
   LLM_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
 
   AGENT_WORKSPACE_ROOT: z.string().min(1).default("./workspace"),
-  // Default raised from 8 to 16 after a real E2E run (task-manager app with a
-  // deliberate bug + an unrelated broken test harness) needed 7+ rounds just to
-  // get through one fix cycle. 8 was too tight for anything involving a genuine
-  // detect -> diagnose -> fix -> retest sequence with any complexity.
-  AGENT_MAX_LOOP_ITERATIONS: z.coerce.number().int().positive().default(16),
+  // History: 8 -> 16 -> 24. A real E2E run at 16 got all the way through a genuine
+  // detect -> diagnose -> fix -> retest cycle (including recovering from an unrelated
+  // test-harness crash) and was only 1-2 tool calls short of DEPLOY/DONE when it hit
+  // the cap. Raised to 24 to give real headroom instead of inching up again.
+  AGENT_MAX_LOOP_ITERATIONS: z.coerce.number().int().positive().default(24),
 
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
 
