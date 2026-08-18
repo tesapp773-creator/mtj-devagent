@@ -16,6 +16,48 @@ export interface DeployCredentials {
   accountId: string;
 }
 
+function cloudflareEnv(credentials: DeployCredentials): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    CLOUDFLARE_API_TOKEN: credentials.apiToken,
+    CLOUDFLARE_ACCOUNT_ID: credentials.accountId,
+  };
+}
+
+/**
+ * Ensures a Cloudflare Pages project exists before deploying to it. Modern
+ * Wrangler versions do NOT auto-create the project on `pages deploy` - it
+ * must exist first, or the deploy fails with "Project not found" (confirmed
+ * via a live test run). This mirrors that fix: create first, ignore the
+ * error if it already exists, then deploy.
+ */
+async function ensureProjectExists(
+  projectName: string,
+  workspaceRoot: string,
+  credentials: DeployCredentials,
+  log: Logger
+): Promise<void> {
+  try {
+    await execFileAsync(
+      "npx",
+      ["wrangler", "pages", "project", "create", projectName, "--production-branch", "main"],
+      {
+        cwd: workspaceRoot,
+        timeout: DEFAULT_TIMEOUT_MS,
+        maxBuffer: 10 * 1024 * 1024,
+        env: cloudflareEnv(credentials),
+      }
+    );
+    log.info(`deploy_project: created new Cloudflare Pages project "${projectName}"`);
+  } catch (err) {
+    // Expected on every deploy after the first: the project already exists.
+    // Wrangler exits non-zero for this - that's fine, not a real failure.
+    log.debug(`deploy_project: project "${projectName}" likely already exists, continuing`, {
+      detail: (err as Error).message,
+    });
+  }
+}
+
 /**
  * Deployment tool: publishes a built project (inside the agent's workspace)
  * to Cloudflare Pages via Wrangler, and returns the live URL. Only
@@ -35,9 +77,10 @@ export function createDeployTools(
     name: "deploy_project",
     description:
       "Deploy a built project directory (e.g. a static site build output like 'dist' or 'build') " +
-      "from the workspace to Cloudflare Pages. Returns the live URL on success. Only call this " +
-      "after a successful BUILD_TEST phase - never deploy code that hasn't been tested. The " +
-      "projectName should be a short, URL-safe name for this deployment (letters, numbers, hyphens).",
+      "from the workspace to Cloudflare Pages. Creates the Pages project automatically if it " +
+      "doesn't exist yet. Returns the live URL on success. Only call this after a successful " +
+      "BUILD_TEST phase - never deploy code that hasn't been tested. The projectName should be a " +
+      "short, URL-safe name for this deployment (letters, numbers, hyphens).",
     parameters: {
       type: "object",
       properties: {
@@ -65,6 +108,8 @@ export function createDeployTools(
 
       log.info(`deploy_project: ${dirArg} -> Cloudflare Pages project "${projectName}"`);
 
+      await ensureProjectExists(projectName, workspace.root, credentials, log);
+
       try {
         const { stdout, stderr } = await execFileAsync(
           "npx",
@@ -73,11 +118,7 @@ export function createDeployTools(
             cwd: workspace.root,
             timeout: DEFAULT_TIMEOUT_MS,
             maxBuffer: 10 * 1024 * 1024,
-            env: {
-              ...process.env,
-              CLOUDFLARE_API_TOKEN: credentials.apiToken,
-              CLOUDFLARE_ACCOUNT_ID: credentials.accountId,
-            },
+            env: cloudflareEnv(credentials),
           }
         );
 
