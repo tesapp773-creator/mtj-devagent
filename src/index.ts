@@ -45,6 +45,19 @@ async function main() {
   for (const step of result.history) {
     log.info(`  [${step.iteration}] ${step.phase}: ${step.summary}`);
   }
+
+  // CRITICAL: a run that didn't reach DONE is a real failure and must be reported
+  // as one via the process exit code - otherwise CI/CD (e.g. GitHub Actions) shows
+  // a green checkmark for a run that actually hit the iteration cap or otherwise
+  // failed to complete. This was confirmed as a real bug: a FAILED run previously
+  // still exited 0 and showed as a passing CI job. Never let that happen silently.
+  if (result.finalPhase !== "DONE") {
+    log.error("MTJ DevAgent run did NOT complete successfully - exiting with failure code", {
+      finalPhase: result.finalPhase,
+      iterations: result.iterations,
+    });
+    process.exit(1);
+  }
 }
 
 main().catch((err) => {
