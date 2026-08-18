@@ -1,4 +1,4 @@
-import OpenAI, { APIError } from "openai";
+import OpenAI from "openai";
 import type { AppConfig } from "../config/index.js";
 import type { Logger } from "../logger/index.js";
 
@@ -13,18 +13,28 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Whether an error is worth retrying. Auth errors (401/403) and bad-request
- * errors (400/404) will never succeed on retry - only network failures,
- * timeouts, and server-side errors (429/5xx) are retryable.
+ * Extracts an HTTP status code and message from an unknown thrown error
+ * without depending on instanceof narrowing against the SDK's error class -
+ * duck-typing here is deliberate so this works regardless of exact SDK
+ * error-class shape across versions.
  */
-function isRetryable(err: unknown): boolean {
-  if (err instanceof APIError) {
-    const status = err.status;
-    if (status === undefined) return true; // connection-level failure (no HTTP response at all)
-    return status === 429 || status >= 500;
-  }
-  // Any non-APIError (e.g. a raw timeout/connection error) is treated as retryable.
-  return true;
+function describeError(err: unknown): { status?: number; message: string } {
+  const status =
+    typeof err === "object" && err !== null && "status" in err && typeof (err as { status?: unknown }).status === "number"
+      ? (err as { status: number }).status
+      : undefined;
+  const message = err instanceof Error ? err.message : String(err);
+  return { status, message };
+}
+
+/**
+ * Whether an error is worth retrying. Auth errors (401/403) and bad-request
+ * errors (400/404) will never succeed on retry - only network failures
+ * (no status at all), timeouts, and server-side errors (429/5xx) are retryable.
+ */
+function isRetryable(status: number | undefined): boolean {
+  if (status === undefined) return true; // connection-level failure, no HTTP response at all
+  return status === 429 || status >= 500;
 }
 
 /**
@@ -80,15 +90,15 @@ export class LlmClient {
         return completion;
       } catch (err) {
         lastError = err;
-        const status = err instanceof APIError ? err.status : undefined;
-        const message = err instanceof Error ? err.message : String(err);
+        const { status, message } = describeError(err);
+        const retryable = isRetryable(status);
 
-        if (!isRetryable(err) || attempt > RETRY_BACKOFF_MS.length) {
+        if (!retryable || attempt > RETRY_BACKOFF_MS.length) {
           this.log.warn("llm.chat failed - not retrying", {
             attempt,
             status,
             message,
-            reason: isRetryable(err) ? "out of retries" : "non-retryable error",
+            reason: retryable ? "out of retries" : "non-retryable error",
           });
           throw err;
         }
@@ -126,8 +136,7 @@ export class LlmClient {
       this.log.info("llm.quickHealthCheck: relay reachable");
       return { ok: true };
     } catch (err) {
-      const status = err instanceof APIError ? err.status : undefined;
-      const message = err instanceof Error ? err.message : String(err);
+      const { status, message } = describeError(err);
       this.log.warn("llm.quickHealthCheck: relay NOT reachable", { status, message });
       return { ok: false, message: `${status ?? "no status"}: ${message}` };
     }
