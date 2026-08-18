@@ -87,6 +87,26 @@ export class DevLoopOrchestrator {
       maxIterations: this.maxIterations,
     });
 
+    // Fail fast if the relay itself is unreachable/misconfigured, rather than
+    // burning the full iteration budget (and several real minutes) only to
+    // fail on the very first real call anyway. This was a real observed
+    // problem: a dead/slow relay made a run look "stuck" for 5+ minutes
+    // before finally failing.
+    this.log.info("checking LLM relay is reachable before starting");
+    const health = await this.llm.quickHealthCheck();
+    if (!health.ok) {
+      this.log.error("LLM relay is not reachable - aborting before using any iterations", {
+        reason: health.message,
+      });
+      history.push({
+        iteration: 0,
+        phase: "FAILED",
+        summary: `LLM relay unreachable before starting: ${health.message}`,
+        timestamp: new Date().toISOString(),
+      });
+      return { finalPhase: "FAILED", iterations: 0, history, transcript: messages };
+    }
+
     let iteration = 0;
     let phase: DevLoopPhase = "PLAN";
     let hasSuccessfulBuildTest = false;
