@@ -18,7 +18,7 @@ describe("loadConfig", () => {
     expect(config.LLM_API_KEY).toBe("test-key-not-real");
     expect(config.LLM_BASE_URL).toBe("https://api.llmsrelay.com/v1");
     expect(config.LLM_MODEL).toBe("claude-sonnet-4.6");
-    expect(config.AGENT_MAX_LOOP_ITERATIONS).toBe(16);
+    expect(config.AGENT_MAX_LOOP_ITERATIONS).toBe(24);
   });
 
   it("respects overridden values", () => {
