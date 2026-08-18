@@ -1,0 +1,36 @@
+name: DevAgent E2E Run
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "Task for MTJ DevAgent to perform"
+        required: false
+        default: "Create a simple production-ready static web page in the agent workspace that displays 'MTJ DevAgent E2E Test', with clean responsive HTML/CSS. Inspect the generated project, build/test it, fix any errors you discover, and deploy it using the existing deploy_project tool."
+
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build MTJ DevAgent
+        run: npm run build
+
+      - name: Run existing tests
+        run: npm test
+
+      - name: Run MTJ DevAgent (PLAN -> CODE -> BUILD/TEST -> FIX -> DEPLOY)
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: node dist/index.js "${{ inputs.task }}"
