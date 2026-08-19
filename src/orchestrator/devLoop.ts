@@ -18,25 +18,45 @@ You work in an explicit development loop with these phases:
 4. READ_ERROR - if BUILD_TEST failed, read the stdout/stderr carefully.
 5. FIX - make targeted file changes to address the error, then go back to BUILD_TEST.
 6. DEPLOY (only if deploy_project is available to you, and only after step 3 has actually
-   succeeded) - publish the built output and report the live URL back to the user.
+   succeeded) - publish the built output and get back the live URL.
+7. VERIFY (required whenever you deployed) - actually check that the LIVE deployed site
+   works, using Playwright, a real browser automation tool - not just re-checking your
+   local unit tests. Concretely:
+   a. Install it in the workspace if not already present: run_command "npm" ["install",
+      "--save-dev", "playwright"], then run_command "npx" ["playwright", "install",
+      "chromium", "--with-deps"].
+   b. Write a short Node script (write_file) that launches Chromium, navigates to the
+      REAL live URL deploy_project returned, exercises the core functionality described
+      in the task (e.g. add an item, click a button, check the result actually appears
+      in the page), and exits non-zero if anything fails or an expected element/text is
+      missing.
+   c. Run it with run_command and read the real result.
+   d. If it fails, treat this exactly like a failed BUILD_TEST: go back through
+      READ_ERROR -> FIX -> re-deploy -> verify again.
+   You may NOT report DONE after a deploy without a passing Playwright check against the
+   real live URL in this same run - a deploy that has not been verified live is not
+   finished, no matter how confident you are that the code is correct.
 
 Repeat BUILD_TEST -> READ_ERROR -> FIX until tests pass or you hit the iteration limit.
 Never call deploy_project unless the most recent BUILD_TEST for this task actually
 succeeded - deploying untested or broken code is not acceptable under any circumstance,
 even if the user seems to be in a hurry.
 
-CRITICAL RULE ABOUT TEST HARNESSES YOU WRITE YOURSELF: if the project has no existing test
-framework, prefer a standard, well-known one (e.g. a real assertion library) over a bespoke
-hand-written runner. If you do write a custom test script, it MUST exit with a non-zero code
-if ANY test fails or throws, and MUST NOT use a fixed timer/timeout to force a zero exit code
-regardless of what happened inside. A test harness that reports success without genuinely
-checking every assertion's outcome is worse than no test at all, because it hides real bugs -
-this is a real failure mode that has been observed before and must be avoided. Before treating
-a BUILD_TEST run as a genuine pass, make sure the exit code you observed actually reflects
-whether every individual test/assertion passed, not just that the process didn't crash.
+CRITICAL RULE ABOUT TEST HARNESSES OR VERIFICATION SCRIPTS YOU WRITE YOURSELF: if the
+project has no existing test framework, prefer a standard, well-known one (e.g. a real
+assertion library) over a bespoke hand-written runner. Any script you write to check
+pass/fail - unit tests AND the Playwright live-verification script - MUST exit with a
+non-zero code if ANY check fails or throws, and MUST NOT use a fixed timer/timeout to
+force a zero exit code regardless of what happened inside. A harness that reports success
+without genuinely checking every outcome is worse than no check at all, because it hides
+real bugs - this is a real failure mode that has been observed before and must be avoided.
+Before treating any BUILD_TEST or VERIFY run as a genuine pass, make sure the exit code
+you observed actually reflects whether every individual check passed, not just that the
+process didn't crash.
 
 When you are done (or stuck), clearly state so in plain text with no further tool calls,
-summarizing what changed, the final test result, and the live URL if you deployed.
+summarizing what changed, the final test result, the live URL, and the live-verification
+result.
 
 Be conservative: only touch files relevant to the current task. Do not invent passing
 results - only report what the tool output actually showed.`;
@@ -64,14 +84,17 @@ export class DevLoopOrchestrator {
   }
 
   /**
-   * Runs the PLAN -> CODE -> BUILD_TEST -> READ_ERROR -> FIX (-> DEPLOY) loop for a
-   * given task description, letting the LLM decide which tools to call at each step.
-   * Stops when the LLM produces a final text-only response (no more tool calls)
+   * Runs the PLAN -> CODE -> BUILD_TEST -> READ_ERROR -> FIX -> DEPLOY -> VERIFY loop
+   * for a given task description, letting the LLM decide which tools to call at each
+   * step. Stops when the LLM produces a final text-only response (no more tool calls)
    * or the iteration limit is reached.
    *
-   * DEPLOY is only reachable if a successful BUILD_TEST happened first in this run -
-   * enforced here in code, not just via the system prompt, since the prompt alone is
-   * not a hard guarantee.
+   * Two guardrails are enforced HERE, in code, not just requested via the system
+   * prompt (the prompt alone is not a hard guarantee):
+   *   1. deploy_project cannot be called unless a run_command already succeeded.
+   *   2. The loop cannot end in DONE if a deploy happened but no run_command has
+   *      succeeded since - i.e. a live-verification step (Playwright) is required
+   *      after every deploy before the run is allowed to finish.
    */
   async run(taskDescription: string): Promise<DevLoopResult> {
     const history: DevLoopStepRecord[] = [];
@@ -110,6 +133,8 @@ export class DevLoopOrchestrator {
     let iteration = 0;
     let phase: DevLoopPhase = "PLAN";
     let hasSuccessfulBuildTest = false;
+    let hasDeployed = false;
+    let hasVerifiedSinceDeploy = false;
 
     while (iteration < this.maxIterations) {
       iteration += 1;
@@ -123,6 +148,29 @@ export class DevLoopOrchestrator {
       const toolCalls = message.tool_calls ?? [];
 
       if (toolCalls.length === 0) {
+        // Guardrail: a deploy without a subsequent successful verification run
+        // is not allowed to count as finished. Nudge the LLM to actually verify
+        // instead of silently accepting its claim that it's done.
+        if (hasDeployed && !hasVerifiedSinceDeploy) {
+          this.log.warn(
+            "blocked finishing - deployed but no successful verification run_command since then"
+          );
+          history.push({
+            iteration,
+            phase: "READ_ERROR",
+            summary: "Blocked finishing: deployed but not yet verified live with Playwright",
+            timestamp: new Date().toISOString(),
+          });
+          messages.push({
+            role: "user",
+            content:
+              "You deployed but have not run a passing verification command since then. " +
+              "You must actually run your Playwright live-verification script against the " +
+              "real deployed URL (via run_command) and confirm it passes before you can finish.",
+          });
+          continue;
+        }
+
         // LLM produced a final answer with no further tool calls - loop is done.
         const summary = message.content ?? "(no summary provided)";
         this.log.info("dev loop finished - no further tool calls", { summary });
@@ -174,8 +222,16 @@ export class DevLoopOrchestrator {
         const result = await this.tools.call(fnName, args);
 
         if (fnName === "run_command") {
-          phase = result.ok ? "BUILD_TEST" : "READ_ERROR";
-          if (result.ok) hasSuccessfulBuildTest = true;
+          phase = result.ok ? (hasDeployed ? "VERIFY" : "BUILD_TEST") : "READ_ERROR";
+          if (result.ok) {
+            hasSuccessfulBuildTest = true;
+            if (hasDeployed) hasVerifiedSinceDeploy = true;
+          }
+        }
+
+        if (fnName === "deploy_project" && result.ok) {
+          hasDeployed = true;
+          hasVerifiedSinceDeploy = false; // each new deploy needs its own fresh verification
         }
 
         history.push({
@@ -212,14 +268,16 @@ function inferPhase(toolName: string, current: DevLoopPhase): DevLoopPhase {
     case "list_dir":
       return "PLAN";
     case "read_file":
-      return current === "BUILD_TEST" || current === "READ_ERROR" ? "READ_ERROR" : "PLAN";
+      return current === "BUILD_TEST" || current === "READ_ERROR" || current === "VERIFY"
+        ? "READ_ERROR"
+        : "PLAN";
     case "write_file":
     case "delete_file":
       return current === "READ_ERROR" ? "FIX" : "CODE";
     case "run_command":
       return "BUILD_TEST";
     case "deploy_project":
-      return "DONE";
+      return "DEPLOY";
     default:
       return current;
   }
