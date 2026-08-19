@@ -20,11 +20,14 @@ const ConfigSchema = z.object({
   LLM_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
 
   AGENT_WORKSPACE_ROOT: z.string().min(1).default("./workspace"),
-  // History: 8 -> 16 -> 24. A real E2E run at 16 got all the way through a genuine
-  // detect -> diagnose -> fix -> retest cycle (including recovering from an unrelated
-  // test-harness crash) and was only 1-2 tool calls short of DEPLOY/DONE when it hit
-  // the cap. Raised to 24 to give real headroom instead of inching up again.
-  AGENT_MAX_LOOP_ITERATIONS: z.coerce.number().int().positive().default(24),
+  // History: 8 -> 16 -> 24 -> 40. A real successful E2E run (build+bug+fix+deploy,
+  // no live verification yet) used 21 of 24 iterations on its own. The dev loop now
+  // also requires a live-verification step after every deploy (Playwright: install,
+  // write a browser script, run it, and loop back through FIX if it fails) before it's
+  // allowed to finish - realistically 5-10+ more tool calls on top of the existing
+  // cycle. Raised proactively to 40 to give real headroom for that additional phase,
+  // rather than waiting to hit the cap again before raising it.
+  AGENT_MAX_LOOP_ITERATIONS: z.coerce.number().int().positive().default(40),
 
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
 
