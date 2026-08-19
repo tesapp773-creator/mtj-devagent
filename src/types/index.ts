@@ -28,6 +28,8 @@ export type DevLoopPhase =
   | "BUILD_TEST"
   | "READ_ERROR"
   | "FIX"
+  | "DEPLOY"
+  | "VERIFY"
   | "DONE"
   | "FAILED";
 
