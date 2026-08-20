@@ -33,7 +33,12 @@ Your task:
 4. Actively try to find real problems: malformed input, edge cases, things the task asked
    for that are missing or broken, accessibility issues, anything that would embarrass a
    real user or represent a genuine security concern.
-5. When finished, respond in plain text with NO further tool calls, in exactly this format:
+5. You have a LIMITED number of tool-call rounds. Budget them deliberately: a couple of
+   focused checks that reach a clear verdict are more useful than many checks that run out
+   of room before concluding. If you receive a warning that you are running low on budget,
+   stop opening new lines of investigation immediately and move straight to a verdict based
+   on what you have already found.
+6. When finished, respond in plain text with NO further tool calls, in exactly this format:
 
 VERDICT: PASS
 or
@@ -43,7 +48,9 @@ ISSUES:
 
 Be honest and specific. A PASS verdict when a real problem exists is worse than a FAIL that
 turns out to be overly cautious - only give PASS if you genuinely tried to find a problem and
-could not.`;
+could not. Running out of budget without giving ANY verdict is the worst outcome of all - it
+is treated as an automatic FAIL and denies the builder your specific findings, so always leave
+yourself enough room to state a verdict even if your investigation is not fully exhaustive.`;
 
 export interface QaReviewInput {
   task: string;
@@ -52,6 +59,35 @@ export interface QaReviewInput {
 
 export interface QaReviewOutput {
   report: string;
+}
+
+/** Number of remaining tool-call rounds at which the QA agent gets a one-time
+ * warning to stop investigating and move to a verdict. */
+const WRAP_UP_WARNING_THRESHOLD = 3;
+
+/** Max number of past tool failures kept for the fallback report if no verdict is reached. */
+const MAX_OBSERVED_FAILURES = 5;
+
+/** Builds a concise, specific summary of a failed tool call, including a tail
+ * snippet of any captured stdout/stderr - this is what actually contains the
+ * real pass/fail detail from a test script (e.g. "\u2717 Task can be deleted"). */
+function summarizeToolFailure(fnName: string, args: Record<string, unknown>, result: ToolResult): string {
+  const data = result.data as
+    | { command?: string; exitCode?: number; stdout?: string; stderr?: string }
+    | undefined;
+  const parts: string[] = [`Tool: ${fnName}`];
+  if (data?.command) {
+    parts.push(`Command: ${data.command}`);
+  } else if (args && Object.keys(args).length > 0) {
+    parts.push(`Args: ${JSON.stringify(args).slice(0, 200)}`);
+  }
+  if (typeof data?.exitCode === "number") parts.push(`Exit code: ${data.exitCode}`);
+  if (result.error) parts.push(`Error: ${result.error}`);
+  const outputSnippet = (data?.stdout || data?.stderr || "").trim();
+  if (outputSnippet) {
+    parts.push(`Output (tail):\n${outputSnippet.slice(-800)}`);
+  }
+  return parts.join("\n");
 }
 
 /**
@@ -106,7 +142,31 @@ export function createQaAgent(config: AppConfig, log: Logger, workspace: Workspa
 
       qaLog.info("QA review starting", { deployedUrl, maxIterations });
 
+      // Real problems found during investigation, kept so that even if the QA
+      // agent runs out of budget before formally concluding, the builder still
+      // receives specific, actionable findings instead of a vague "no verdict"
+      // message - this was a real observed gap: a review that found genuine
+      // failures in two separate test suites still produced a generic fallback
+      // report because those specifics weren't carried forward.
+      const observedFailures: string[] = [];
+      let warnedAboutBudget = false;
+
       for (let iteration = 1; iteration <= maxIterations; iteration++) {
+        const remaining = maxIterations - iteration + 1;
+        if (remaining <= WRAP_UP_WARNING_THRESHOLD && !warnedAboutBudget) {
+          warnedAboutBudget = true;
+          qaLog.info("QA agent nearing its iteration budget - sending wrap-up reminder", { remaining });
+          messages.push({
+            role: "user",
+            content:
+              `You have only ${remaining} tool-call rounds left before this review times out. ` +
+              `Stop opening new lines of investigation now. If you have already found a real ` +
+              `problem, respond with VERDICT: FAIL and the specific issues you found. If you ` +
+              `have not found anything concrete after genuine effort, respond with VERDICT: PASS. ` +
+              `Do not let this run out without a verdict.`,
+          });
+        }
+
         qaLog.info(`QA iteration ${iteration}/${maxIterations}`);
         const completion = await llm.chat(messages, toolSpecs);
         const choice = completion.choices[0];
@@ -136,14 +196,33 @@ export function createQaAgent(config: AppConfig, log: Logger, workspace: Workspa
             ? await tool.execute(args)
             : { ok: false, error: `QA agent tried to use an unavailable tool: ${fnName}` };
           qaLog.info(`QA tool call: ${fnName}`, { args, ok: result.ok });
+
+          // Capture real command failures (e.g. a genuinely failing verification
+          // script) as candidate findings, in case no formal verdict is reached.
+          if (!result.ok && fnName === "run_command") {
+            observedFailures.push(summarizeToolFailure(fnName, args, result));
+            if (observedFailures.length > MAX_OBSERVED_FAILURES) observedFailures.shift();
+          }
+
           messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(result) });
         }
       }
 
-      qaLog.warn("QA review hit its iteration budget without reaching a verdict - treating as FAIL");
-      const output: QaReviewOutput = {
-        report: "QA review did not reach a verdict within its iteration budget - treated as FAIL out of caution.",
-      };
+      qaLog.warn("QA review hit its iteration budget without reaching a verdict - treating as FAIL", {
+        observedFailureCount: observedFailures.length,
+      });
+
+      const fallbackReport =
+        observedFailures.length > 0
+          ? `QA review did not reach a formal verdict within its iteration budget, but found ` +
+            `real problems during investigation before running out of room. Treated as FAIL ` +
+            `out of caution. Specific findings observed during review:\n\n` +
+            observedFailures.map((f, i) => `--- Finding ${i + 1} ---\n${f}`).join("\n\n")
+          : `QA review did not reach a verdict within its iteration budget, and no specific ` +
+            `command failures were observed during its investigation - treated as FAIL out of ` +
+            `caution since a review that could not conclude cannot be trusted as a genuine pass.`;
+
+      const output: QaReviewOutput = { report: fallbackReport };
       return { ok: false, data: output };
     },
   };
