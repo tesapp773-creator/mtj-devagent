@@ -3,7 +3,7 @@ import type { Logger } from "../logger/index.js";
 import { LlmClient, type ChatMessage } from "../llm/client.js";
 import { ToolRegistry } from "../tools/registry.js";
 import { AgentRegistry } from "../agents/registry.js";
-import type { DevLoopPhase, DevLoopStepRecord } from "../types/index.js";
+import type { DevLoopPhase, DevLoopStepRecord, ToolResult } from "../types/index.js";
 
 const SYSTEM_PROMPT = `You are the lead software developer inside MTJ DevAgent, an autonomous
 coding agent. You do not write final answers in prose - you accomplish the task by calling
@@ -33,9 +33,17 @@ You work in an explicit development loop with these phases:
    c. Run it with run_command and read the real result.
    d. If it fails, treat this exactly like a failed BUILD_TEST: go back through
       READ_ERROR -> FIX -> re-deploy -> verify again.
-   You may NOT report DONE after a deploy without a passing Playwright check against the
-   real live URL in this same run - a deploy that has not been verified live is not
-   finished, no matter how confident you are that the code is correct.
+8. QA REVIEW (automatic, after VERIFY passes) - an INDEPENDENT QA agent, with no memory
+   of you writing this code, will automatically inspect your work and may run its own
+   checks against the live site. You will receive its verdict as a message. If it reports
+   problems, treat them exactly like a failed BUILD_TEST: read them carefully, fix the
+   real issues in your code, redeploy, re-verify, and the QA agent will review again. You
+   cannot skip or argue past a QA failure - only a genuine fix resolves it.
+
+You may NOT report DONE after a deploy without a passing Playwright check against the
+real live URL in this same run, AND a passing independent QA review - a deploy that has
+not been verified live and QA-reviewed is not finished, no matter how confident you are
+that the code is correct.
 
 Repeat BUILD_TEST -> READ_ERROR -> FIX until tests pass or you hit the iteration limit.
 Never call deploy_project unless the most recent BUILD_TEST for this task actually
@@ -55,8 +63,8 @@ you observed actually reflects whether every individual check passed, not just t
 process didn't crash.
 
 When you are done (or stuck), clearly state so in plain text with no further tool calls,
-summarizing what changed, the final test result, the live URL, and the live-verification
-result.
+summarizing what changed, the final test result, the live URL, the live-verification
+result, and the independent QA review's verdict.
 
 Be conservative: only touch files relevant to the current task. Do not invent passing
 results - only report what the tool output actually showed.`;
@@ -84,17 +92,21 @@ export class DevLoopOrchestrator {
   }
 
   /**
-   * Runs the PLAN -> CODE -> BUILD_TEST -> READ_ERROR -> FIX -> DEPLOY -> VERIFY loop
-   * for a given task description, letting the LLM decide which tools to call at each
-   * step. Stops when the LLM produces a final text-only response (no more tool calls)
-   * or the iteration limit is reached.
+   * Runs the PLAN -> CODE -> BUILD_TEST -> READ_ERROR -> FIX -> DEPLOY -> VERIFY -> QA
+   * loop for a given task description, letting the LLM decide which tools to call at
+   * each step. Stops when the LLM produces a final text-only response (no more tool
+   * calls) or the iteration limit is reached.
    *
-   * Two guardrails are enforced HERE, in code, not just requested via the system
+   * Three guardrails are enforced HERE, in code, not just requested via the system
    * prompt (the prompt alone is not a hard guarantee):
    *   1. deploy_project cannot be called unless a run_command already succeeded.
    *   2. The loop cannot end in DONE if a deploy happened but no run_command has
-   *      succeeded since - i.e. a live-verification step (Playwright) is required
-   *      after every deploy before the run is allowed to finish.
+   *      succeeded since - a live-verification step (Playwright) is required after
+   *      every deploy before the run is allowed to finish.
+   *   3. The loop cannot end in DONE if a deploy happened but the independent
+   *      qa-reviewer agent (if registered) has not returned a genuine PASS since the
+   *      most recent deploy. A fresh deploy resets this - a code change after a QA
+   *      pass requires a new QA pass before finishing again.
    */
   async run(taskDescription: string): Promise<DevLoopResult> {
     const history: DevLoopStepRecord[] = [];
@@ -130,11 +142,15 @@ export class DevLoopOrchestrator {
       return { finalPhase: "FAILED", iterations: 0, history, transcript: messages };
     }
 
+    const qaAgent = this.agents.get("qa-reviewer");
+
     let iteration = 0;
     let phase: DevLoopPhase = "PLAN";
     let hasSuccessfulBuildTest = false;
     let hasDeployed = false;
     let hasVerifiedSinceDeploy = false;
+    let hasPassedQaSinceDeploy = false;
+    let lastDeployedUrl: string | undefined;
 
     while (iteration < this.maxIterations) {
       iteration += 1;
@@ -148,9 +164,8 @@ export class DevLoopOrchestrator {
       const toolCalls = message.tool_calls ?? [];
 
       if (toolCalls.length === 0) {
-        // Guardrail: a deploy without a subsequent successful verification run
-        // is not allowed to count as finished. Nudge the LLM to actually verify
-        // instead of silently accepting its claim that it's done.
+        // Guardrail 2: a deploy without a subsequent successful verification run
+        // is not allowed to count as finished.
         if (hasDeployed && !hasVerifiedSinceDeploy) {
           this.log.warn(
             "blocked finishing - deployed but no successful verification run_command since then"
@@ -171,7 +186,43 @@ export class DevLoopOrchestrator {
           continue;
         }
 
-        // LLM produced a final answer with no further tool calls - loop is done.
+        // Guardrail 3: after a successful deploy + verify, an independent QA agent
+        // (if one is registered) must also return a genuine PASS before the run can
+        // finish. This is a real, separate LLM review - not a rubber stamp.
+        if (hasDeployed && qaAgent && !hasPassedQaSinceDeploy) {
+          this.log.info("running independent QA review before allowing DONE", {
+            deployedUrl: lastDeployedUrl,
+          });
+          const qaResult = await qaAgent.run({ task: taskDescription, deployedUrl: lastDeployedUrl });
+          const report = (qaResult.data as { report?: string } | undefined)?.report ?? "(no report)";
+
+          history.push({
+            iteration,
+            phase: qaResult.ok ? "VERIFY" : "READ_ERROR",
+            summary: `qa-reviewer -> ${qaResult.ok ? "PASS" : "FAIL"}`,
+            timestamp: new Date().toISOString(),
+          });
+
+          if (qaResult.ok) {
+            hasPassedQaSinceDeploy = true;
+            this.log.info("independent QA review PASSED", { report });
+            // Fall through below to accept DONE now that both gates have passed.
+          } else {
+            this.log.warn("blocked finishing - independent QA review found issues", { report });
+            messages.push({
+              role: "user",
+              content:
+                `An independent QA reviewer (a separate agent with no memory of writing this ` +
+                `code) checked your work and found issues. You must address these before ` +
+                `finishing:\n\n${report}\n\nFix the real problems, redeploy if needed, ` +
+                `re-verify, and only then attempt to finish again.`,
+            });
+            continue;
+          }
+        }
+
+        // LLM produced a final answer with no further tool calls, and both post-deploy
+        // gates (if applicable) have genuinely passed - loop is done.
         const summary = message.content ?? "(no summary provided)";
         this.log.info("dev loop finished - no further tool calls", { summary });
         history.push({
@@ -200,7 +251,7 @@ export class DevLoopOrchestrator {
         // system prompt, so it can't be talked around.
         if (fnName === "deploy_project" && !hasSuccessfulBuildTest) {
           this.log.warn("blocked deploy_project call - no successful BUILD_TEST yet this run");
-          const blocked = {
+          const blocked: ToolResult = {
             ok: false,
             error:
               "deploy_project blocked: no successful build/test has run yet in this session. " +
@@ -232,6 +283,9 @@ export class DevLoopOrchestrator {
         if (fnName === "deploy_project" && result.ok) {
           hasDeployed = true;
           hasVerifiedSinceDeploy = false; // each new deploy needs its own fresh verification
+          hasPassedQaSinceDeploy = false; // ...and its own fresh independent QA review
+          const deployData = result.data as { url?: string } | undefined;
+          if (deployData?.url) lastDeployedUrl = deployData.url;
         }
 
         history.push({
