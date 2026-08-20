@@ -30,11 +30,15 @@ const ConfigSchema = z.object({
   AGENT_MAX_LOOP_ITERATIONS: z.coerce.number().int().positive().default(40),
 
   // Separate, smaller iteration budget for the independent QA agent's own review
-  // loop (src/agents/qaAgent.ts). This is intentionally distinct from
-  // AGENT_MAX_LOOP_ITERATIONS - the QA agent's job (inspect, write one verification
-  // script, run it, form a verdict) is narrower than the builder's full PLAN->DEPLOY
-  // cycle, so it needs its own, smaller budget rather than sharing the builder's.
-  QA_MAX_ITERATIONS: z.coerce.number().int().positive().default(12),
+  // loop (src/agents/qaAgent.ts). Distinct from AGENT_MAX_LOOP_ITERATIONS since the
+  // QA agent's job is narrower than the builder's full PLAN->DEPLOY cycle.
+  // History: 12 -> 24. A real QA review used all 12 of its original budget writing
+  // and running FOUR separate real Playwright suites (functional, edge-case,
+  // accessibility, and a targeted bug investigation) - genuinely thorough, real
+  // adversarial testing - and was still mid-investigation, writing a fifth suite,
+  // when it ran out, never reaching a formal verdict. Raised to give it real room
+  // to actually conclude after this level of legitimate thoroughness.
+  QA_MAX_ITERATIONS: z.coerce.number().int().positive().default(24),
 
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
 
