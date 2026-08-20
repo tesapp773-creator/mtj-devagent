@@ -3,6 +3,7 @@ import { createLogger } from "./logger/index.js";
 import { ToolRegistry } from "./tools/registry.js";
 import { AgentRegistry } from "./agents/registry.js";
 import { DevLoopOrchestrator } from "./orchestrator/devLoop.js";
+import { createQaAgent } from "./agents/qaAgent.js";
 
 async function main() {
   const config = loadConfig();
@@ -25,9 +26,13 @@ async function main() {
   });
   await tools.workspace.ensureExists();
 
-  // Step 3+ will register specialist agents here, e.g.:
-  // agents.register(createQaAgent(...));
+  // Independent QA reviewer: a genuinely separate LLM conversation with no memory
+  // of writing the code, read-only access to the app's own files, and its own
+  // restricted write_qa_file tool (see src/agents/qaAgent.ts). The main dev loop
+  // hard-requires a genuine PASS from this agent after every deploy before it is
+  // allowed to report DONE.
   const agents = new AgentRegistry();
+  agents.register(createQaAgent(config, log, tools.workspace));
 
   const orchestrator = new DevLoopOrchestrator(config, log, tools, agents);
 
