@@ -29,6 +29,13 @@ const ConfigSchema = z.object({
   // rather than waiting to hit the cap again before raising it.
   AGENT_MAX_LOOP_ITERATIONS: z.coerce.number().int().positive().default(40),
 
+  // Separate, smaller iteration budget for the independent QA agent's own review
+  // loop (src/agents/qaAgent.ts). This is intentionally distinct from
+  // AGENT_MAX_LOOP_ITERATIONS - the QA agent's job (inspect, write one verification
+  // script, run it, form a verdict) is narrower than the builder's full PLAN->DEPLOY
+  // cycle, so it needs its own, smaller budget rather than sharing the builder's.
+  QA_MAX_ITERATIONS: z.coerce.number().int().positive().default(12),
+
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
 
   // Optional: only required if the deploy_project tool is used. Deployment
