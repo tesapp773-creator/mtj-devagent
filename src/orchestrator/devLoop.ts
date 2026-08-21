@@ -14,7 +14,12 @@ You work in an explicit development loop with these phases:
 1. PLAN - inspect the project (inspect_project, list_dir, read_file) and state a short plan.
 2. CODE - make the necessary file changes using write_file.
 3. BUILD_TEST - actually run the project's install/build/test commands with run_command.
-   Never claim a test passed unless you actually ran it and saw the result.
+   Never claim a test passed unless you actually ran it and saw the result. If the project
+   is JavaScript/TypeScript, it is worth also running a linter (e.g. run_command "npm"
+   ["install", "--save-dev", "eslint"] then "npx" ["eslint", "."] with a minimal default
+   config) to catch real issues like unused variables or unsafe patterns. Lint findings
+   are informative and worth fixing where reasonable, but a lint-only issue should not by
+   itself block you from deploying the way a genuine failing test does.
 4. READ_ERROR - if BUILD_TEST failed, read the stdout/stderr carefully.
 5. FIX - make targeted file changes to address the error, then go back to BUILD_TEST.
 6. DEPLOY (only if deploy_project is available to you, and only after step 3 has actually
@@ -31,8 +36,18 @@ You work in an explicit development loop with these phases:
       in the page), and exits non-zero if anything fails or an expected element/text is
       missing.
    c. Run it with run_command and read the real result.
-   d. If it fails, treat this exactly like a failed BUILD_TEST: go back through
-      READ_ERROR -> FIX -> re-deploy -> verify again.
+   d. IMPORTANT: a fresh deployment can occasionally take a short moment for the hosting
+      provider's network to finish propagating a working TLS/SSL certificate for the new
+      URL. If your very first attempt to reach the live URL fails with a connection,
+      SSL, or TLS-related error (not a real application bug), do NOT immediately assume
+      the deployment is broken or switch to an alternative like serving the files
+      locally - that would defeat the purpose of verifying the REAL live deployment.
+      Instead, wait briefly and retry the same real URL two or three times first. Only
+      fall back to an alternative verification strategy if the real URL still fails
+      after those retries.
+   e. If it fails for a real reason (not a transient connection issue), treat this
+      exactly like a failed BUILD_TEST: go back through READ_ERROR -> FIX -> re-deploy
+      -> verify again.
 8. QA REVIEW (automatic, after VERIFY passes) - an INDEPENDENT QA agent, with no memory
    of you writing this code, will automatically inspect your work and may run its own
    checks against the live site. You will receive its verdict as a message. If it reports
@@ -75,6 +90,20 @@ export interface DevLoopResult {
   history: DevLoopStepRecord[];
   transcript: ChatMessage[];
 }
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Short, deterministic pause after a successful deploy, before the next LLM call.
+// Real evidence: a builder's live-verification attempt failed with a TLS/SSL
+// handshake error immediately after a fresh Cloudflare Pages deploy, forcing an
+// awkward local-server workaround - yet an independent QA review pointed at the
+// exact same URL a few minutes later worked immediately. This strongly suggests a
+// brief CDN propagation delay, not a real defect. This pause is a cheap, code-level
+// mitigation (not a guarantee) that gives that propagation window a moment to close
+// before verification is attempted, on top of the prompt-level retry guidance above.
+const POST_DEPLOY_SETTLE_MS = 10_000;
 
 export class DevLoopOrchestrator {
   private readonly llm: LlmClient;
@@ -286,6 +315,11 @@ export class DevLoopOrchestrator {
           hasPassedQaSinceDeploy = false; // ...and its own fresh independent QA review
           const deployData = result.data as { url?: string } | undefined;
           if (deployData?.url) lastDeployedUrl = deployData.url;
+
+          this.log.info(`pausing ${POST_DEPLOY_SETTLE_MS}ms after deploy to let CDN/TLS settle`, {
+            url: lastDeployedUrl,
+          });
+          await sleep(POST_DEPLOY_SETTLE_MS);
         }
 
         history.push({
