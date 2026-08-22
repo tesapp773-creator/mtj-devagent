@@ -30,15 +30,26 @@ Your task:
    installed, or install it if not). Do not simply trust or re-run whatever verification
    script the builder already wrote - write your own, from your own reading of the task, so
    you are checking independently rather than just re-confirming their work.
-4. Actively try to find real problems: malformed input, edge cases, things the task asked
-   for that are missing or broken, accessibility issues, anything that would embarrass a
-   real user or represent a genuine security concern.
-5. You have a LIMITED number of tool-call rounds. Budget them deliberately: a couple of
+4. SECURITY REVIEW IS MANDATORY, not optional, and carries the same weight as a functional
+   bug - a real security finding is grounds for VERDICT: FAIL on its own, even if everything
+   else works perfectly. Actively look for: hardcoded secrets or API keys in source; unsafe
+   use of innerHTML/eval or other DOM sinks with unsanitized input (XSS); injection risks in
+   any server-side or command-construction code; insecure randomness used for anything
+   security-sensitive (tokens, IDs); missing input validation that could let malformed or
+   oversized data through; anything a real attacker could exploit. If Semgrep is already
+   installed in the workspace, you may run it yourself for a second opinion (run_command
+   "semgrep" ["--config", "p/security-audit", "--config", "p/owasp-top-ten", "--config",
+   "p/secrets", "--error"]) - but do not rely on it alone; also read the actual code with
+   an adversarial eye, since automated scanners miss things a careful reviewer catches.
+5. Also actively try to find other real problems: malformed input, edge cases, things the
+   task asked for that are missing or broken, accessibility issues, anything that would
+   embarrass a real user.
+6. You have a LIMITED number of tool-call rounds. Budget them deliberately: a couple of
    focused checks that reach a clear verdict are more useful than many checks that run out
    of room before concluding. If you receive a warning that you are running low on budget,
    stop opening new lines of investigation immediately and move straight to a verdict based
    on what you have already found.
-6. When finished, respond in plain text with NO further tool calls, in exactly this format:
+7. When finished, respond in plain text with NO further tool calls, in exactly this format:
 
 VERDICT: PASS
 or
@@ -46,11 +57,12 @@ VERDICT: FAIL
 ISSUES:
 - (one bullet per concrete problem found, or "none" if PASS)
 
-Be honest and specific. A PASS verdict when a real problem exists is worse than a FAIL that
-turns out to be overly cautious - only give PASS if you genuinely tried to find a problem and
-could not. Running out of budget without giving ANY verdict is the worst outcome of all - it
-is treated as an automatic FAIL and denies the builder your specific findings, so always leave
-yourself enough room to state a verdict even if your investigation is not fully exhaustive.`;
+Be honest and specific. A PASS verdict when a real problem exists - functional OR security -
+is worse than a FAIL that turns out to be overly cautious - only give PASS if you genuinely
+tried to find a problem, including a security-specific pass, and could not. Running out of
+budget without giving ANY verdict is the worst outcome of all - it is treated as an automatic
+FAIL and denies the builder your specific findings, so always leave yourself enough room to
+state a verdict even if your investigation is not fully exhaustive.`;
 
 export interface QaReviewInput {
   task: string;
@@ -97,6 +109,11 @@ function summarizeToolFailure(fnName: string, args: Record<string, unknown>, res
  * application's own files - only inspect them, run commands, and write its own scratch
  * files under qa/. Runs its own bounded loop (QA_MAX_ITERATIONS), separate from the
  * main dev loop's iteration budget.
+ *
+ * Security review is a mandatory part of this agent's checklist (see QA_SYSTEM_PROMPT):
+ * a genuine security finding results in the same PASS/FAIL verdict already hard-gated in
+ * devLoop.ts, so security gets real, code-enforced teeth without needing a separate new
+ * gating mechanism.
  */
 export function createQaAgent(config: AppConfig, log: Logger, workspace: Workspace): AgentDefinition {
   const qaLog = log.child("qa-agent");
@@ -123,8 +140,9 @@ export function createQaAgent(config: AppConfig, log: Logger, workspace: Workspa
     name: "qa-reviewer",
     description:
       "Independent QA agent with no memory of writing the code and no ability to modify " +
-      "application files - reviews the builder's finished work, actively tries to find " +
-      "real problems, and returns a PASS/FAIL verdict with specifics.",
+      "application files - reviews the builder's finished work, including a mandatory " +
+      "security pass, actively tries to find real problems, and returns a PASS/FAIL " +
+      "verdict with specifics.",
     run: async (input: Record<string, unknown>): Promise<ToolResult> => {
       const typedInput = input as unknown as QaReviewInput;
       const { task, deployedUrl } = typedInput;
@@ -198,7 +216,8 @@ export function createQaAgent(config: AppConfig, log: Logger, workspace: Workspa
           qaLog.info(`QA tool call: ${fnName}`, { args, ok: result.ok });
 
           // Capture real command failures (e.g. a genuinely failing verification
-          // script) as candidate findings, in case no formal verdict is reached.
+          // script, or a real Semgrep finding via --error) as candidate findings,
+          // in case no formal verdict is reached.
           if (!result.ok && fnName === "run_command") {
             observedFailures.push(summarizeToolFailure(fnName, args, result));
             if (observedFailures.length > MAX_OBSERVED_FAILURES) observedFailures.shift();
