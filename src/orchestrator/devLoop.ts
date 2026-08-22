@@ -20,6 +20,17 @@ You work in an explicit development loop with these phases:
    config) to catch real issues like unused variables or unsafe patterns. Lint findings
    are informative and worth fixing where reasonable, but a lint-only issue should not by
    itself block you from deploying the way a genuine failing test does.
+3b. SECURITY SCAN (required, treat with the same seriousness as a failing test) - run
+   Semgrep with a comprehensive, real security ruleset before you consider your work ready
+   to deploy: run_command "python3" ["-m", "pip", "install", "--quiet", "semgrep"] (or
+   "pip3" if that fails), then run_command "semgrep" ["--config", "p/security-audit",
+   "--config", "p/owasp-top-ten", "--config", "p/secrets", "--error"] (the --error flag
+   makes it exit non-zero on real findings, the same way a failing test would). Read any
+   genuine findings (hardcoded secrets, injection risks, unsafe DOM/HTML sinks like
+   innerHTML with unsanitized input, insecure randomness, etc.) and fix them before moving
+   on - do not deploy code with a known, real security finding just because the rest of the
+   app works. Use your judgment on what is a real, actionable issue versus rule noise, but
+   default to fixing rather than dismissing.
 4. READ_ERROR - if BUILD_TEST failed, read the stdout/stderr carefully.
 5. FIX - make targeted file changes to address the error, then go back to BUILD_TEST.
 6. DEPLOY (only if deploy_project is available to you, and only after step 3 has actually
@@ -49,11 +60,12 @@ You work in an explicit development loop with these phases:
       exactly like a failed BUILD_TEST: go back through READ_ERROR -> FIX -> re-deploy
       -> verify again.
 8. QA REVIEW (automatic, after VERIFY passes) - an INDEPENDENT QA agent, with no memory
-   of you writing this code, will automatically inspect your work and may run its own
-   checks against the live site. You will receive its verdict as a message. If it reports
-   problems, treat them exactly like a failed BUILD_TEST: read them carefully, fix the
-   real issues in your code, redeploy, re-verify, and the QA agent will review again. You
-   cannot skip or argue past a QA failure - only a genuine fix resolves it.
+   of you writing this code, will automatically inspect your work, including its own
+   security review, and may run its own checks against the live site. You will receive
+   its verdict as a message. If it reports problems - functional OR security - treat them
+   exactly like a failed BUILD_TEST: read them carefully, fix the real issues in your
+   code, redeploy, re-verify, and the QA agent will review again. You cannot skip or argue
+   past a QA failure - only a genuine fix resolves it.
 
 You may NOT report DONE after a deploy without a passing Playwright check against the
 real live URL in this same run, AND a passing independent QA review - a deploy that has
@@ -78,8 +90,8 @@ you observed actually reflects whether every individual check passed, not just t
 process didn't crash.
 
 When you are done (or stuck), clearly state so in plain text with no further tool calls,
-summarizing what changed, the final test result, the live URL, the live-verification
-result, and the independent QA review's verdict.
+summarizing what changed, the final test result, the security scan result, the live URL,
+the live-verification result, and the independent QA review's verdict.
 
 Be conservative: only touch files relevant to the current task. Do not invent passing
 results - only report what the tool output actually showed.`;
@@ -135,7 +147,10 @@ export class DevLoopOrchestrator {
    *   3. The loop cannot end in DONE if a deploy happened but the independent
    *      qa-reviewer agent (if registered) has not returned a genuine PASS since the
    *      most recent deploy. A fresh deploy resets this - a code change after a QA
-   *      pass requires a new QA pass before finishing again.
+   *      pass requires a new QA pass before finishing again. This is also where
+   *      security review gets real enforcement (see qaAgent.ts) - the QA agent's
+   *      mandatory security checklist feeds into the SAME PASS/FAIL verdict that is
+   *      already hard-gated here, rather than needing a separate new gate.
    */
   async run(taskDescription: string): Promise<DevLoopResult> {
     const history: DevLoopStepRecord[] = [];
@@ -217,7 +232,9 @@ export class DevLoopOrchestrator {
 
         // Guardrail 3: after a successful deploy + verify, an independent QA agent
         // (if one is registered) must also return a genuine PASS before the run can
-        // finish. This is a real, separate LLM review - not a rubber stamp.
+        // finish. This is a real, separate LLM review - not a rubber stamp - and its
+        // checklist now explicitly includes security, so a real security finding
+        // blocks completion here exactly like any other QA failure.
         if (hasDeployed && qaAgent && !hasPassedQaSinceDeploy) {
           this.log.info("running independent QA review before allowing DONE", {
             deployedUrl: lastDeployedUrl,
@@ -242,9 +259,9 @@ export class DevLoopOrchestrator {
               role: "user",
               content:
                 `An independent QA reviewer (a separate agent with no memory of writing this ` +
-                `code) checked your work and found issues. You must address these before ` +
-                `finishing:\n\n${report}\n\nFix the real problems, redeploy if needed, ` +
-                `re-verify, and only then attempt to finish again.`,
+                `code) checked your work, including security, and found issues. You must ` +
+                `address these before finishing:\n\n${report}\n\nFix the real problems, ` +
+                `redeploy if needed, re-verify, and only then attempt to finish again.`,
             });
             continue;
           }
