@@ -10,6 +10,23 @@ coding agent. You do not write final answers in prose - you accomplish the task 
 the tools available to you (read_file, write_file, list_dir, delete_file, run_command,
 inspect_project, and deploy_project if it appears in your tool list).
 
+FIRST, DETERMINE WHAT KIND OF PROJECT THIS IS. Call inspect_project immediately. If it shows
+an EMPTY or near-empty workspace, you are building something new from scratch - proceed as
+usual. If it shows an EXISTING, non-trivial project already there, you are EXTENDING someone
+else's real work, and different rules apply:
+- Read enough of the existing code to understand its real conventions, structure, and
+  existing test framework (if any) BEFORE writing anything. Use whatever test framework is
+  already there rather than introducing a new one, unless none exists.
+- Make ONLY the minimal changes the task actually requires. Do not restructure, rewrite,
+  rename, or delete things beyond what the task explicitly asks for, even if you think a
+  different approach would be better - that is not your call to make unilaterally on someone
+  else's existing project.
+- Your changes will be submitted as a pull request for a human to review, not merged
+  automatically. If you touch anything beyond the obvious minimal scope of the task for a
+  good reason, say so explicitly and clearly in your final summary so the human reviewer
+  notices it and can judge whether it was warranted - never bury an unrequested change
+  silently in a diff.
+
 You work in an explicit development loop with these phases:
 1. PLAN - inspect the project (inspect_project, list_dir, read_file) and state a short plan.
 2. CODE - make the necessary file changes using write_file.
@@ -34,7 +51,9 @@ You work in an explicit development loop with these phases:
 4. READ_ERROR - if BUILD_TEST failed, read the stdout/stderr carefully.
 5. FIX - make targeted file changes to address the error, then go back to BUILD_TEST.
 6. DEPLOY (only if deploy_project is available to you, and only after step 3 has actually
-   succeeded) - publish the built output and get back the live URL.
+   succeeded) - publish the built output and get back the live URL. deploy_project may not
+   be available at all for this run (e.g. deployment was intentionally left off) - that is
+   fine, it simply means this task ends after a passing QA review instead.
 7. VERIFY (required whenever you deployed) - actually check that the LIVE deployed site
    works, using Playwright, a real browser automation tool - not just re-checking your
    local unit tests. Concretely:
@@ -59,18 +78,19 @@ You work in an explicit development loop with these phases:
    e. If it fails for a real reason (not a transient connection issue), treat this
       exactly like a failed BUILD_TEST: go back through READ_ERROR -> FIX -> re-deploy
       -> verify again.
-8. QA REVIEW (automatic, after VERIFY passes) - an INDEPENDENT QA agent, with no memory
-   of you writing this code, will automatically inspect your work, including its own
-   security review, and may run its own checks against the live site. You will receive
-   its verdict as a message. If it reports problems - functional OR security - treat them
-   exactly like a failed BUILD_TEST: read them carefully, fix the real issues in your
-   code, redeploy, re-verify, and the QA agent will review again. You cannot skip or argue
-   past a QA failure - only a genuine fix resolves it.
+8. QA REVIEW (automatic, required once your build/test genuinely passes, whether or not
+   you deployed) - an INDEPENDENT QA agent, with no memory of you writing this code, will
+   automatically inspect your work, including its own security review, and may run its own
+   checks against the live site if one exists. You will receive its verdict as a message.
+   If it reports problems - functional OR security - treat them exactly like a failed
+   BUILD_TEST: read them carefully, fix the real issues in your code, redeploy/re-verify if
+   applicable, and the QA agent will review again. You cannot skip or argue past a QA
+   failure - only a genuine fix resolves it.
 
-You may NOT report DONE after a deploy without a passing Playwright check against the
-real live URL in this same run, AND a passing independent QA review - a deploy that has
-not been verified live and QA-reviewed is not finished, no matter how confident you are
-that the code is correct.
+You may NOT report DONE without a passing independent QA review. If you deployed, you
+additionally may NOT report DONE without a passing Playwright check against the real live
+URL in this same run - a deploy that has not been verified live is not finished, no matter
+how confident you are that the code is correct.
 
 Repeat BUILD_TEST -> READ_ERROR -> FIX until tests pass or you hit the iteration limit.
 Never call deploy_project unless the most recent BUILD_TEST for this task actually
@@ -90,8 +110,9 @@ you observed actually reflects whether every individual check passed, not just t
 process didn't crash.
 
 When you are done (or stuck), clearly state so in plain text with no further tool calls,
-summarizing what changed, the final test result, the security scan result, the live URL,
-the live-verification result, and the independent QA review's verdict.
+summarizing what changed, the final test result, the security scan result, the live URL
+(if any), the live-verification result (if applicable), and the independent QA review's
+verdict.
 
 Be conservative: only touch files relevant to the current task. Do not invent passing
 results - only report what the tool output actually showed.`;
@@ -138,19 +159,22 @@ export class DevLoopOrchestrator {
    * each step. Stops when the LLM produces a final text-only response (no more tool
    * calls) or the iteration limit is reached.
    *
-   * Three guardrails are enforced HERE, in code, not just requested via the system
-   * prompt (the prompt alone is not a hard guarantee):
+   * Guardrails enforced HERE, in code, not just requested via the system prompt (the
+   * prompt alone is not a hard guarantee):
    *   1. deploy_project cannot be called unless a run_command already succeeded.
    *   2. The loop cannot end in DONE if a deploy happened but no run_command has
    *      succeeded since - a live-verification step (Playwright) is required after
    *      every deploy before the run is allowed to finish.
-   *   3. The loop cannot end in DONE if a deploy happened but the independent
-   *      qa-reviewer agent (if registered) has not returned a genuine PASS since the
-   *      most recent deploy. A fresh deploy resets this - a code change after a QA
-   *      pass requires a new QA pass before finishing again. This is also where
-   *      security review gets real enforcement (see qaAgent.ts) - the QA agent's
-   *      mandatory security checklist feeds into the SAME PASS/FAIL verdict that is
-   *      already hard-gated here, rather than needing a separate new gate.
+   *   3. The loop cannot end in DONE unless the independent qa-reviewer agent (if
+   *      registered) has returned a genuine PASS since the most recent successful
+   *      build/test. This is DELIBERATELY not conditioned on having deployed - existing-
+   *      project runs (where deployment is off by default, changes go out as a pull
+   *      request instead) still require a genuine QA pass before finishing, since a human
+   *      reviewer should see already-QA-reviewed work, not a raw first draft. Any new file
+   *      edit (write_file/delete_file) or new deploy resets this - a code change after a
+   *      QA pass requires a fresh QA pass before finishing again. Security review is part
+   *      of that same mandatory QA checklist (see qaAgent.ts), so it gets real enforcement
+   *      here too, without needing a separate gate.
    */
   async run(taskDescription: string): Promise<DevLoopResult> {
     const history: DevLoopStepRecord[] = [];
@@ -193,7 +217,7 @@ export class DevLoopOrchestrator {
     let hasSuccessfulBuildTest = false;
     let hasDeployed = false;
     let hasVerifiedSinceDeploy = false;
-    let hasPassedQaSinceDeploy = false;
+    let hasPassedQaReview = false;
     let lastDeployedUrl: string | undefined;
 
     while (iteration < this.maxIterations) {
@@ -230,12 +254,12 @@ export class DevLoopOrchestrator {
           continue;
         }
 
-        // Guardrail 3: after a successful deploy + verify, an independent QA agent
-        // (if one is registered) must also return a genuine PASS before the run can
-        // finish. This is a real, separate LLM review - not a rubber stamp - and its
-        // checklist now explicitly includes security, so a real security finding
-        // blocks completion here exactly like any other QA failure.
-        if (hasDeployed && qaAgent && !hasPassedQaSinceDeploy) {
+        // Guardrail 3: an independent QA agent (if one is registered) must return a
+        // genuine PASS, once a build/test has actually succeeded, before the run can
+        // finish - regardless of whether a deploy happened. This is a real, separate
+        // LLM review - not a rubber stamp - and its checklist includes security, so a
+        // real security finding blocks completion here exactly like any other failure.
+        if (hasSuccessfulBuildTest && qaAgent && !hasPassedQaReview) {
           this.log.info("running independent QA review before allowing DONE", {
             deployedUrl: lastDeployedUrl,
           });
@@ -250,9 +274,9 @@ export class DevLoopOrchestrator {
           });
 
           if (qaResult.ok) {
-            hasPassedQaSinceDeploy = true;
+            hasPassedQaReview = true;
             this.log.info("independent QA review PASSED", { report });
-            // Fall through below to accept DONE now that both gates have passed.
+            // Fall through below to accept DONE now that all applicable gates have passed.
           } else {
             this.log.warn("blocked finishing - independent QA review found issues", { report });
             messages.push({
@@ -261,14 +285,14 @@ export class DevLoopOrchestrator {
                 `An independent QA reviewer (a separate agent with no memory of writing this ` +
                 `code) checked your work, including security, and found issues. You must ` +
                 `address these before finishing:\n\n${report}\n\nFix the real problems, ` +
-                `redeploy if needed, re-verify, and only then attempt to finish again.`,
+                `redeploy/re-verify if applicable, and only then attempt to finish again.`,
             });
             continue;
           }
         }
 
-        // LLM produced a final answer with no further tool calls, and both post-deploy
-        // gates (if applicable) have genuinely passed - loop is done.
+        // LLM produced a final answer with no further tool calls, and all applicable
+        // gates have genuinely passed - loop is done.
         const summary = message.content ?? "(no summary provided)";
         this.log.info("dev loop finished - no further tool calls", { summary });
         history.push({
@@ -326,10 +350,16 @@ export class DevLoopOrchestrator {
           }
         }
 
+        // Any real file change invalidates a prior QA pass - the reviewed code has
+        // moved on, so a fresh review is required before finishing again.
+        if ((fnName === "write_file" || fnName === "delete_file") && result.ok) {
+          hasPassedQaReview = false;
+        }
+
         if (fnName === "deploy_project" && result.ok) {
           hasDeployed = true;
           hasVerifiedSinceDeploy = false; // each new deploy needs its own fresh verification
-          hasPassedQaSinceDeploy = false; // ...and its own fresh independent QA review
+          hasPassedQaReview = false; // ...and its own fresh independent QA review
           const deployData = result.data as { url?: string } | undefined;
           if (deployData?.url) lastDeployedUrl = deployData.url;
 
