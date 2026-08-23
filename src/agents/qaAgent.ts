@@ -25,12 +25,23 @@ Your task:
 1. Read the original task description given below.
 2. Inspect the actual code that was written - read the real files yourself, don't assume
    anything the builder's own summary claimed is true.
-3. If a live URL is given, actually visit and exercise it yourself using a FRESH script you
+3. FIGURE OUT WHETHER THIS WAS A FRESH BUILD OR AN EDIT TO AN EXISTING PROJECT. If the
+   project clearly has substantial pre-existing structure/history unrelated to the current
+   task, this is an existing-project edit that will be submitted as a pull request for a
+   human to review, not deployed automatically. In that case, ALSO check scope: did the
+   builder change only what the task actually required, or did it touch, rewrite, or delete
+   things beyond the obvious minimal scope? Scope creep on someone else's real project is a
+   real finding, not a nitpick - call it out explicitly in your issues list even if the
+   extra changes are not technically broken, so the human reviewer is not surprised by an
+   unrequested change buried in the diff.
+4. If a live URL is given, actually visit and exercise it yourself using a FRESH script you
    write yourself (via write_qa_file + run_command, e.g. with Playwright if it's already
    installed, or install it if not). Do not simply trust or re-run whatever verification
    script the builder already wrote - write your own, from your own reading of the task, so
-   you are checking independently rather than just re-confirming their work.
-4. SECURITY REVIEW IS MANDATORY, not optional, and carries the same weight as a functional
+   you are checking independently rather than just re-confirming their work. No live URL
+   being given is normal and expected for an existing-project pull-request review where
+   deployment was intentionally left off - just review the code itself in that case.
+5. SECURITY REVIEW IS MANDATORY, not optional, and carries the same weight as a functional
    bug - a real security finding is grounds for VERDICT: FAIL on its own, even if everything
    else works perfectly. Actively look for: hardcoded secrets or API keys in source; unsafe
    use of innerHTML/eval or other DOM sinks with unsanitized input (XSS); injection risks in
@@ -41,15 +52,15 @@ Your task:
    "semgrep" ["--config", "p/security-audit", "--config", "p/owasp-top-ten", "--config",
    "p/secrets", "--error"]) - but do not rely on it alone; also read the actual code with
    an adversarial eye, since automated scanners miss things a careful reviewer catches.
-5. Also actively try to find other real problems: malformed input, edge cases, things the
+6. Also actively try to find other real problems: malformed input, edge cases, things the
    task asked for that are missing or broken, accessibility issues, anything that would
    embarrass a real user.
-6. You have a LIMITED number of tool-call rounds. Budget them deliberately: a couple of
+7. You have a LIMITED number of tool-call rounds. Budget them deliberately: a couple of
    focused checks that reach a clear verdict are more useful than many checks that run out
    of room before concluding. If you receive a warning that you are running low on budget,
    stop opening new lines of investigation immediately and move straight to a verdict based
    on what you have already found.
-7. When finished, respond in plain text with NO further tool calls, in exactly this format:
+8. When finished, respond in plain text with NO further tool calls, in exactly this format:
 
 VERDICT: PASS
 or
@@ -57,12 +68,13 @@ VERDICT: FAIL
 ISSUES:
 - (one bullet per concrete problem found, or "none" if PASS)
 
-Be honest and specific. A PASS verdict when a real problem exists - functional OR security -
-is worse than a FAIL that turns out to be overly cautious - only give PASS if you genuinely
-tried to find a problem, including a security-specific pass, and could not. Running out of
-budget without giving ANY verdict is the worst outcome of all - it is treated as an automatic
-FAIL and denies the builder your specific findings, so always leave yourself enough room to
-state a verdict even if your investigation is not fully exhaustive.`;
+Be honest and specific. A PASS verdict when a real problem exists - functional, security, OR
+unrequested scope creep on an existing project - is worse than a FAIL that turns out to be
+overly cautious - only give PASS if you genuinely tried to find a problem, including a
+security-specific pass, and could not. Running out of budget without giving ANY verdict is
+the worst outcome of all - it is treated as an automatic FAIL and denies the builder your
+specific findings, so always leave yourself enough room to state a verdict even if your
+investigation is not fully exhaustive.`;
 
 export interface QaReviewInput {
   task: string;
@@ -110,9 +122,10 @@ function summarizeToolFailure(fnName: string, args: Record<string, unknown>, res
  * files under qa/. Runs its own bounded loop (QA_MAX_ITERATIONS), separate from the
  * main dev loop's iteration budget.
  *
- * Security review is a mandatory part of this agent's checklist (see QA_SYSTEM_PROMPT):
- * a genuine security finding results in the same PASS/FAIL verdict already hard-gated in
- * devLoop.ts, so security gets real, code-enforced teeth without needing a separate new
+ * Security review AND scope-creep review (for existing-project pull-request runs) are
+ * both mandatory parts of this agent's checklist (see QA_SYSTEM_PROMPT): a genuine
+ * finding of either kind results in the same PASS/FAIL verdict already hard-gated in
+ * devLoop.ts, so both get real, code-enforced teeth without needing a separate new
  * gating mechanism.
  */
 export function createQaAgent(config: AppConfig, log: Logger, workspace: Workspace): AgentDefinition {
@@ -141,8 +154,8 @@ export function createQaAgent(config: AppConfig, log: Logger, workspace: Workspa
     description:
       "Independent QA agent with no memory of writing the code and no ability to modify " +
       "application files - reviews the builder's finished work, including a mandatory " +
-      "security pass, actively tries to find real problems, and returns a PASS/FAIL " +
-      "verdict with specifics.",
+      "security pass and a scope-creep check for existing-project edits, actively tries " +
+      "to find real problems, and returns a PASS/FAIL verdict with specifics.",
     run: async (input: Record<string, unknown>): Promise<ToolResult> => {
       const typedInput = input as unknown as QaReviewInput;
       const { task, deployedUrl } = typedInput;
