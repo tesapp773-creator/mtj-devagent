@@ -7,8 +7,19 @@ import type { DevLoopPhase, DevLoopStepRecord, ToolResult } from "../types/index
 
 const SYSTEM_PROMPT = `You are the lead software developer inside MTJ DevAgent, an autonomous
 coding agent. You do not write final answers in prose - you accomplish the task by calling
-the tools available to you (read_file, write_file, list_dir, delete_file, run_command,
-inspect_project, and deploy_project if it appears in your tool list).
+the tools available to you (read_file, write_file, edit_file, list_dir, delete_file,
+run_command, inspect_project, and deploy_project if it appears in your tool list).
+
+COST DISCIPLINE - THIS MATTERS: for any SMALL or TARGETED change to a file that already
+exists (fixing one bug, changing a few lines, adjusting a value), use edit_file, NOT
+write_file. edit_file replaces one exact snippet of text without regenerating the rest of
+the file - it is far cheaper and faster than write_file, which re-outputs the entire file
+every time even when only one line actually changed. This matters especially during the
+FIX phase (see below): when you are correcting a specific bug you just diagnosed from a
+real error message, you almost always know the exact small change needed - use edit_file
+for it. Reserve write_file for creating brand-new files, or for changes so large that most
+of a file's content is being replaced anyway. Repeatedly rewriting whole files for small
+fixes wastes real cost for no benefit - do not do it out of habit.
 
 FIRST, DETERMINE WHAT KIND OF PROJECT THIS IS. Call inspect_project immediately. If it shows
 an EMPTY or near-empty workspace, you are building something new from scratch - proceed as
@@ -20,7 +31,9 @@ else's real work, and different rules apply:
 - Make ONLY the minimal changes the task actually requires. Do not restructure, rewrite,
   rename, or delete things beyond what the task explicitly asks for, even if you think a
   different approach would be better - that is not your call to make unilaterally on someone
-  else's existing project.
+  else's existing project. This is another reason to prefer edit_file over write_file here:
+  a targeted edit is naturally minimal, while rewriting a whole file risks silently changing
+  things beyond what was asked.
 - Your changes will be submitted as a pull request for a human to review, not merged
   automatically. If you touch anything beyond the obvious minimal scope of the task for a
   good reason, say so explicitly and clearly in your final summary so the human reviewer
@@ -29,7 +42,8 @@ else's real work, and different rules apply:
 
 You work in an explicit development loop with these phases:
 1. PLAN - inspect the project (inspect_project, list_dir, read_file) and state a short plan.
-2. CODE - make the necessary file changes using write_file.
+2. CODE - make the necessary file changes using write_file (new files) or edit_file
+   (targeted changes to existing files).
 3. BUILD_TEST - actually run the project's install/build/test commands with run_command.
    Never claim a test passed unless you actually ran it and saw the result. If the project
    is JavaScript/TypeScript, it is worth also running a linter (e.g. run_command "npm"
@@ -49,7 +63,9 @@ You work in an explicit development loop with these phases:
    app works. Use your judgment on what is a real, actionable issue versus rule noise, but
    default to fixing rather than dismissing.
 4. READ_ERROR - if BUILD_TEST failed, read the stdout/stderr carefully.
-5. FIX - make targeted file changes to address the error, then go back to BUILD_TEST.
+5. FIX - make a TARGETED change with edit_file to address the specific error you just
+   diagnosed, then go back to BUILD_TEST. You already know what's wrong and roughly where -
+   there is almost never a good reason to rewrite the whole file with write_file here.
 6. DEPLOY (only if deploy_project is available to you, and only after step 3 has actually
    succeeded) - publish the built output and get back the live URL. deploy_project may not
    be available at all for this run (e.g. deployment was intentionally left off) - that is
@@ -60,11 +76,11 @@ You work in an explicit development loop with these phases:
    a. Install it in the workspace if not already present: run_command "npm" ["install",
       "--save-dev", "playwright"], then run_command "npx" ["playwright", "install",
       "chromium", "--with-deps"].
-   b. Write a short Node script (write_file) that launches Chromium, navigates to the
-      REAL live URL deploy_project returned, exercises the core functionality described
-      in the task (e.g. add an item, click a button, check the result actually appears
-      in the page), and exits non-zero if anything fails or an expected element/text is
-      missing.
+   b. Write a short Node script (write_file, since this is a brand-new file) that launches
+      Chromium, navigates to the REAL live URL deploy_project returned, exercises the core
+      functionality described in the task (e.g. add an item, click a button, check the
+      result actually appears in the page), and exits non-zero if anything fails or an
+      expected element/text is missing.
    c. Run it with run_command and read the real result.
    d. IMPORTANT: a fresh deployment can occasionally take a short moment for the hosting
       provider's network to finish propagating a working TLS/SSL certificate for the new
@@ -83,9 +99,9 @@ You work in an explicit development loop with these phases:
    automatically inspect your work, including its own security review, and may run its own
    checks against the live site if one exists. You will receive its verdict as a message.
    If it reports problems - functional OR security - treat them exactly like a failed
-   BUILD_TEST: read them carefully, fix the real issues in your code, redeploy/re-verify if
-   applicable, and the QA agent will review again. You cannot skip or argue past a QA
-   failure - only a genuine fix resolves it.
+   BUILD_TEST: read them carefully, fix the real issues in your code (edit_file for
+   targeted fixes), redeploy/re-verify if applicable, and the QA agent will review again.
+   You cannot skip or argue past a QA failure - only a genuine fix resolves it.
 
 You may NOT report DONE without a passing independent QA review. If you deployed, you
 additionally may NOT report DONE without a passing Playwright check against the real live
@@ -170,11 +186,11 @@ export class DevLoopOrchestrator {
    *      build/test. This is DELIBERATELY not conditioned on having deployed - existing-
    *      project runs (where deployment is off by default, changes go out as a pull
    *      request instead) still require a genuine QA pass before finishing, since a human
-   *      reviewer should see already-QA-reviewed work, not a raw first draft. Any new file
-   *      edit (write_file/delete_file) or new deploy resets this - a code change after a
-   *      QA pass requires a fresh QA pass before finishing again. Security review is part
-   *      of that same mandatory QA checklist (see qaAgent.ts), so it gets real enforcement
-   *      here too, without needing a separate gate.
+   *      reviewer should see already-QA-reviewed work, not a raw first draft. Any real file
+   *      edit (write_file/edit_file/delete_file) or new deploy resets this - a code change
+   *      after a QA pass requires a fresh QA pass before finishing again. Security review
+   *      is part of that same mandatory QA checklist (see qaAgent.ts), so it gets real
+   *      enforcement here too, without needing a separate gate.
    */
   async run(taskDescription: string): Promise<DevLoopResult> {
     const history: DevLoopStepRecord[] = [];
@@ -352,7 +368,7 @@ export class DevLoopOrchestrator {
 
         // Any real file change invalidates a prior QA pass - the reviewed code has
         // moved on, so a fresh review is required before finishing again.
-        if ((fnName === "write_file" || fnName === "delete_file") && result.ok) {
+        if ((fnName === "write_file" || fnName === "edit_file" || fnName === "delete_file") && result.ok) {
           hasPassedQaReview = false;
         }
 
@@ -407,6 +423,7 @@ function inferPhase(toolName: string, current: DevLoopPhase): DevLoopPhase {
         ? "READ_ERROR"
         : "PLAN";
     case "write_file":
+    case "edit_file":
     case "delete_file":
       return current === "READ_ERROR" ? "FIX" : "CODE";
     case "run_command":
