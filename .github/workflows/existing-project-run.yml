@@ -1,0 +1,82 @@
+name: Existing Project Run
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "Task for MTJ DevAgent to perform on the target repo"
+        required: true
+      target_repo:
+        description: "Target repository, format: owner/repo-name"
+        required: true
+      allow_deploy:
+        description: "Allow this run to deploy to Cloudflare Pages?"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout MTJ DevAgent
+        uses: actions/checkout@v4
+
+      - name: Checkout target repository into workspace
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.target_repo }}
+          token: ${{ secrets.TARGET_REPO_TOKEN }}
+          path: workspace
+
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build MTJ DevAgent
+        run: npm run build
+
+      - name: Run existing tests
+        run: npm test
+
+      - name: Run MTJ DevAgent (deploy allowed)
+        if: ${{ inputs.allow_deploy }}
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: node dist/index.js "${{ inputs.task }}"
+
+      - name: Run MTJ DevAgent (deploy disabled)
+        if: ${{ !inputs.allow_deploy }}
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+        run: node dist/index.js "${{ inputs.task }}"
+
+      - name: Commit changes and open pull request
+        if: success()
+        working-directory: workspace
+        env:
+          GH_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
+          TASK_TEXT: ${{ inputs.task }}
+          TARGET_REPO: ${{ inputs.target_repo }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          git config user.name "MTJ DevAgent"
+          git config user.email "mtj-devagent@users.noreply.github.com"
+          BRANCH="mtj-devagent/run-${{ github.run_id }}"
+          git checkout -b "$BRANCH"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes were made - skipping commit and PR."
+            exit 0
+          fi
+          git commit -m "MTJ DevAgent automated change (run ${{ github.run_id }})"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${TARGET_REPO}.git"
+          git push origin "$BRANCH"
+          printf '**Task given to the agent:**\n\n%s\n\n---\nThis PR was generated automatically and already reviewed by an independent QA agent (see the run log for its verdict, including security and scope findings). Review carefully before merging.\n\nFull run log: %s\n' "$TASK_TEXT" "$RUN_URL" > pr_body.txt
+          gh pr create --repo "$TARGET_REPO" --head "$BRANCH" --title "MTJ DevAgent automated changes" --body-file pr_body.txt
