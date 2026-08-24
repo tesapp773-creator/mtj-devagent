@@ -4,6 +4,7 @@ import { Workspace } from "./workspace.js";
 import { createFileTools } from "./fileTools.js";
 import { createCommandTools } from "./commandTools.js";
 import { createInspectTools } from "./inspectTools.js";
+import { createSearchTools } from "./searchTools.js";
 import { createDeployTools } from "./deployTools.js";
 
 export interface ToolRegistryOptions {
@@ -30,6 +31,7 @@ export class ToolRegistry {
       ...createFileTools(this.workspace, log.child("tool")),
       ...createCommandTools(this.workspace, log.child("tool")),
       ...createInspectTools(this.workspace, log.child("tool")),
+      ...createSearchTools(this.workspace, log.child("tool")),
     ];
 
     const cfApiToken = options.cloudflare?.apiToken;
