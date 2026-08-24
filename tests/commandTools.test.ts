@@ -44,4 +44,21 @@ describe("command tools", () => {
     expect(result.ok).toBe(true);
     expect((result.data as any).stdout.trim()).toBe("true");
   });
+
+  it("keeps the TAIL of very long output, not the head - the real error/summary is usually at the end", async () => {
+    // Simulate a long test run: a huge wall of harmless "PASS" lines, followed by the
+    // one line that actually matters - the final real failure summary.
+    const script =
+      "for (let i = 0; i < 3000; i++) { console.log('PASS test ' + i + ' - '.repeat(3)); } " +
+      "console.log('FINAL_SUMMARY: 1 failed, 2999 passed');";
+    const result = await runCommand.execute({ command: "node", args: ["-e", script] });
+    expect(result.ok).toBe(true);
+    const stdout = (result.data as any).stdout as string;
+    // The output was long enough to be truncated...
+    expect(stdout).toMatch(/truncated \d+ earlier chars/);
+    // ...but the actually important final line must still be present.
+    expect(stdout).toMatch(/FINAL_SUMMARY: 1 failed, 2999 passed/);
+    // And the very early lines (now irrelevant) should have been cut.
+    expect(stdout).not.toMatch(/PASS test 0 /);
+  });
 });
