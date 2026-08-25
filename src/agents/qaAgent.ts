@@ -6,6 +6,7 @@ import type { Workspace } from "../tools/workspace.js";
 import { createFileTools } from "../tools/fileTools.js";
 import { createCommandTools } from "../tools/commandTools.js";
 import { createInspectTools } from "../tools/inspectTools.js";
+import { createSearchTools } from "../tools/searchTools.js";
 import { createQaWriteTool } from "../tools/qaTools.js";
 
 const QA_SYSTEM_PROMPT = `You are an INDEPENDENT QA reviewer inside MTJ DevAgent. You did NOT
@@ -16,6 +17,9 @@ not to confirm what is right.
 You have NO ability to modify the application's own source files - write_file and delete_file
 are not available to you. You can only:
 - read_file, list_dir, inspect_project: inspect the real code that was actually written.
+- search_code: search for a plain-text pattern across every file (like grep) - use this to
+  quickly find where something is defined or used instead of reading many files one by one,
+  especially in a large or unfamiliar existing project.
 - run_command: execute existing tests, install tools, run scripts.
 - write_qa_file: create your OWN scratch/verification files. These always land in a qa/
   folder no matter what path you request - you cannot write anywhere else, and specifically
@@ -23,8 +27,9 @@ are not available to you. You can only:
 
 Your task:
 1. Read the original task description given below.
-2. Inspect the actual code that was written - read the real files yourself, don't assume
-   anything the builder's own summary claimed is true.
+2. Inspect the actual code that was written - read the real files yourself (use search_code
+   first if the project is large, to find the relevant files quickly), don't assume anything
+   the builder's own summary claimed is true.
 3. FIGURE OUT WHETHER THIS WAS A FRESH BUILD OR AN EDIT TO AN EXISTING PROJECT. If the
    project clearly has substantial pre-existing structure/history unrelated to the current
    task, this is an existing-project edit that will be submitted as a pull request for a
@@ -47,11 +52,13 @@ Your task:
    use of innerHTML/eval or other DOM sinks with unsanitized input (XSS); injection risks in
    any server-side or command-construction code; insecure randomness used for anything
    security-sensitive (tokens, IDs); missing input validation that could let malformed or
-   oversized data through; anything a real attacker could exploit. If Semgrep is already
-   installed in the workspace, you may run it yourself for a second opinion (run_command
-   "semgrep" ["--config", "p/security-audit", "--config", "p/owasp-top-ten", "--config",
-   "p/secrets", "--error"]) - but do not rely on it alone; also read the actual code with
-   an adversarial eye, since automated scanners miss things a careful reviewer catches.
+   oversized data through; anything a real attacker could exploit. search_code is useful
+   here too - e.g. searching for "innerHTML", "eval(", or common secret-like patterns across
+   the whole project in one pass. If Semgrep is already installed in the workspace, you may
+   run it yourself for a second opinion (run_command "semgrep" ["--config", "p/security-audit",
+   "--config", "p/owasp-top-ten", "--config", "p/secrets", "--error"]) - but do not rely on
+   it alone; also read the actual code with an adversarial eye, since automated scanners miss
+   things a careful reviewer catches.
 6. Also actively try to find other real problems: malformed input, edge cases, things the
    task asked for that are missing or broken, accessibility issues, anything that would
    embarrass a real user.
@@ -118,9 +125,9 @@ function summarizeToolFailure(fnName: string, args: Record<string, unknown>, res
  * Builds the independent QA reviewer as an AgentDefinition: a genuinely separate LLM
  * conversation (its own fresh message history, own system prompt, own small tool set)
  * that reviews the SAME workspace the builder just worked in, but cannot modify the
- * application's own files - only inspect them, run commands, and write its own scratch
- * files under qa/. Runs its own bounded loop (QA_MAX_ITERATIONS), separate from the
- * main dev loop's iteration budget.
+ * application's own files - only inspect them, search them, run commands, and write its
+ * own scratch files under qa/. Runs its own bounded loop (QA_MAX_ITERATIONS), separate
+ * from the main dev loop's iteration budget.
  *
  * Security review AND scope-creep review (for existing-project pull-request runs) are
  * both mandatory parts of this agent's checklist (see QA_SYSTEM_PROMPT): a genuine
@@ -138,6 +145,7 @@ export function createQaAgent(config: AppConfig, log: Logger, workspace: Workspa
     ),
     ...createCommandTools(workspace, qaLog.child("tool")),
     ...createInspectTools(workspace, qaLog.child("tool")),
+    ...createSearchTools(workspace, qaLog.child("tool")),
     createQaWriteTool(workspace, qaLog.child("tool")),
   ];
 
