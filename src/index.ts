@@ -47,6 +47,16 @@ async function main() {
     iterations: result.iterations,
   });
 
+  // Real cost visibility: total tokens used across the builder's own calls AND every
+  // independent QA review this run triggered, summed directly from the API's own
+  // reported usage - not an estimate. Kept as its own clearly-labeled log line so it
+  // isn't lost among the per-step history below.
+  log.info("Total LLM token usage this run", {
+    promptTokens: result.tokenUsage.promptTokens,
+    completionTokens: result.tokenUsage.completionTokens,
+    totalTokens: result.tokenUsage.totalTokens,
+  });
+
   for (const step of result.history) {
     log.info(`  [${step.iteration}] ${step.phase}: ${step.summary}`);
   }
