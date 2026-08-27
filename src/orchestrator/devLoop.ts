@@ -75,7 +75,10 @@ You work in an explicit development loop with these phases:
 4. READ_ERROR - if BUILD_TEST failed, read the stdout/stderr carefully.
 5. FIX - make a TARGETED change with edit_file to address the specific error you just
    diagnosed, then go back to BUILD_TEST. You already know what's wrong and roughly where -
-   there is almost never a good reason to rewrite the whole file with write_file here.
+   there is almost never a good reason to rewrite the whole file with write_file here. If
+   you are told you appear stuck repeating the same failing command, that means your last
+   fix did not actually change the outcome - stop and re-read the file's real current
+   content before trying again, since your mental model of what's in the file may be wrong.
 6. DEPLOY (only if deploy_project is available to you, and only after step 3 has actually
    succeeded) - publish the built output and get back the live URL. deploy_project may not
    be available at all for this run (e.g. deployment was intentionally left off) - that is
@@ -143,11 +146,21 @@ verdict.
 Be conservative: only touch files relevant to the current task. Do not invent passing
 results - only report what the tool output actually showed.`;
 
+export interface TokenUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
 export interface DevLoopResult {
   finalPhase: DevLoopPhase;
   iterations: number;
   history: DevLoopStepRecord[];
   transcript: ChatMessage[];
+  /** Combined token usage across every LLM call this run made - the builder's own
+   * calls plus every independent QA review call. Real cost visibility, not an
+   * estimate: summed directly from each API response's own reported usage. */
+  tokenUsage: TokenUsage;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -163,6 +176,40 @@ function sleep(ms: number): Promise<void> {
 // mitigation (not a guarantee) that gives that propagation window a moment to close
 // before verification is attempted, on top of the prompt-level retry guidance above.
 const POST_DEPLOY_SETTLE_MS = 10_000;
+
+// Number of consecutive, identical run_command failures (same command, same error
+// prefix) before the loop injects a one-time "you appear stuck" nudge. This is a
+// real, well-known failure mode in agentic loops: repeating a fix that isn't
+// actually working, burning iteration budget without progress. The nudge fires
+// once per run - it's a course-correction, not a hard stop, since the agent may
+// have a legitimate reason to retry (e.g. a flaky command).
+const STUCK_LOOP_THRESHOLD = 3;
+
+function extractUsage(completion: { usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } }): TokenUsage {
+  const usage = completion.usage;
+  return {
+    promptTokens: usage?.prompt_tokens ?? 0,
+    completionTokens: usage?.completion_tokens ?? 0,
+    totalTokens: usage?.total_tokens ?? 0,
+  };
+}
+
+function addUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
+  return {
+    promptTokens: a.promptTokens + b.promptTokens,
+    completionTokens: a.completionTokens + b.completionTokens,
+    totalTokens: a.totalTokens + b.totalTokens,
+  };
+}
+
+/** A signature identifying "the same failure" for stuck-loop detection: the exact
+ * command plus the start of its error message. Two failures with the same
+ * signature in a row strongly suggest a fix attempt didn't actually change
+ * anything. */
+function failureSignature(result: ToolResult): string {
+  const data = result.data as { command?: string } | undefined;
+  return `${data?.command ?? "?"}::${(result.error ?? "").slice(0, 150)}`;
+}
 
 export class DevLoopOrchestrator {
   private readonly llm: LlmClient;
@@ -216,6 +263,8 @@ export class DevLoopOrchestrator {
       maxIterations: this.maxIterations,
     });
 
+    let tokenUsage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+
     // Fail fast if the relay itself is unreachable/misconfigured, rather than
     // burning the full iteration budget (and several real minutes) only to
     // fail on the very first real call anyway. This was a real observed
@@ -233,7 +282,7 @@ export class DevLoopOrchestrator {
         summary: `LLM relay unreachable before starting: ${health.message}`,
         timestamp: new Date().toISOString(),
       });
-      return { finalPhase: "FAILED", iterations: 0, history, transcript: messages };
+      return { finalPhase: "FAILED", iterations: 0, history, transcript: messages, tokenUsage };
     }
 
     const qaAgent = this.agents.get("qa-reviewer");
@@ -245,12 +294,16 @@ export class DevLoopOrchestrator {
     let hasVerifiedSinceDeploy = false;
     let hasPassedQaReview = false;
     let lastDeployedUrl: string | undefined;
+    let lastFailureSignature: string | undefined;
+    let consecutiveSameFailureCount = 0;
+    let warnedAboutStuckLoop = false;
 
     while (iteration < this.maxIterations) {
       iteration += 1;
       this.log.info(`iteration ${iteration}/${this.maxIterations} - calling LLM`, { phase });
 
       const completion = await this.llm.chat(messages, this.tools.toOpenAiToolSpecs());
+      tokenUsage = addUsage(tokenUsage, extractUsage(completion));
       const choice = completion.choices[0];
       const message = choice.message;
       messages.push(message);
@@ -291,6 +344,8 @@ export class DevLoopOrchestrator {
           });
           const qaResult = await qaAgent.run({ task: taskDescription, deployedUrl: lastDeployedUrl });
           const report = (qaResult.data as { report?: string } | undefined)?.report ?? "(no report)";
+          const qaUsage = (qaResult.data as { tokenUsage?: TokenUsage } | undefined)?.tokenUsage;
+          if (qaUsage) tokenUsage = addUsage(tokenUsage, qaUsage);
 
           history.push({
             iteration,
@@ -320,14 +375,14 @@ export class DevLoopOrchestrator {
         // LLM produced a final answer with no further tool calls, and all applicable
         // gates have genuinely passed - loop is done.
         const summary = message.content ?? "(no summary provided)";
-        this.log.info("dev loop finished - no further tool calls", { summary });
+        this.log.info("dev loop finished - no further tool calls", { summary, tokenUsage });
         history.push({
           iteration,
           phase: "DONE",
           summary: typeof summary === "string" ? summary : JSON.stringify(summary),
           timestamp: new Date().toISOString(),
         });
-        return { finalPhase: "DONE", iterations: iteration, history, transcript: messages };
+        return { finalPhase: "DONE", iterations: iteration, history, transcript: messages, tokenUsage };
       }
 
       for (const call of toolCalls) {
@@ -373,6 +428,34 @@ export class DevLoopOrchestrator {
           if (result.ok) {
             hasSuccessfulBuildTest = true;
             if (hasDeployed) hasVerifiedSinceDeploy = true;
+            // A genuine success resets the stuck-loop counter - the agent made progress.
+            consecutiveSameFailureCount = 0;
+            lastFailureSignature = undefined;
+          } else {
+            const signature = failureSignature(result);
+            if (signature === lastFailureSignature) {
+              consecutiveSameFailureCount += 1;
+            } else {
+              lastFailureSignature = signature;
+              consecutiveSameFailureCount = 1;
+            }
+            if (consecutiveSameFailureCount >= STUCK_LOOP_THRESHOLD && !warnedAboutStuckLoop) {
+              warnedAboutStuckLoop = true;
+              this.log.warn("detected a stuck loop - same command failing repeatedly with no progress", {
+                signature,
+                count: consecutiveSameFailureCount,
+              });
+              messages.push({
+                role: "user",
+                content:
+                  `You have run the exact same command and gotten the exact same failure ` +
+                  `${consecutiveSameFailureCount} times in a row. Whatever you have been trying is ` +
+                  `not working - stop repeating it. Re-read the actual current content of the ` +
+                  `relevant file(s) with read_file to confirm what is really there (your last edit ` +
+                  `may not have applied the way you expected), reconsider your diagnosis from ` +
+                  `scratch, and try a genuinely different fix.`,
+              });
+            }
           }
         }
 
@@ -412,6 +495,7 @@ export class DevLoopOrchestrator {
 
     this.log.warn("dev loop hit max iterations without a final answer", {
       maxIterations: this.maxIterations,
+      tokenUsage,
     });
     history.push({
       iteration,
@@ -419,7 +503,7 @@ export class DevLoopOrchestrator {
       summary: `Stopped after ${this.maxIterations} iterations without completion`,
       timestamp: new Date().toISOString(),
     });
-    return { finalPhase: "FAILED", iterations: iteration, history, transcript: messages };
+    return { finalPhase: "FAILED", iterations: iteration, history, transcript: messages, tokenUsage };
   }
 }
 
