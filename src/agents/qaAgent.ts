@@ -3,6 +3,7 @@ import type { Logger } from "../logger/index.js";
 import { LlmClient, type ChatMessage } from "../llm/client.js";
 import type { AgentDefinition, ToolDefinition, ToolResult } from "../types/index.js";
 import type { Workspace } from "../tools/workspace.js";
+import type { TokenUsage } from "../orchestrator/devLoop.js";
 import { createFileTools } from "../tools/fileTools.js";
 import { createCommandTools } from "../tools/commandTools.js";
 import { createInspectTools } from "../tools/inspectTools.js";
@@ -90,6 +91,10 @@ export interface QaReviewInput {
 
 export interface QaReviewOutput {
   report: string;
+  /** This QA review's own token usage, so the main loop can fold it into the
+   * run's combined total (see devLoop.ts) - real cost visibility across both
+   * the builder and every independent review it triggers. */
+  tokenUsage: TokenUsage;
 }
 
 /** Number of remaining tool-call rounds at which the QA agent gets a one-time
@@ -119,6 +124,23 @@ function summarizeToolFailure(fnName: string, args: Record<string, unknown>, res
     parts.push(`Output (tail):\n${outputSnippet.slice(-800)}`);
   }
   return parts.join("\n");
+}
+
+function extractUsage(completion: { usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } }): TokenUsage {
+  const usage = completion.usage;
+  return {
+    promptTokens: usage?.prompt_tokens ?? 0,
+    completionTokens: usage?.completion_tokens ?? 0,
+    totalTokens: usage?.total_tokens ?? 0,
+  };
+}
+
+function addUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
+  return {
+    promptTokens: a.promptTokens + b.promptTokens,
+    completionTokens: a.completionTokens + b.completionTokens,
+    totalTokens: a.totalTokens + b.totalTokens,
+  };
 }
 
 /**
@@ -181,6 +203,8 @@ export function createQaAgent(config: AppConfig, log: Logger, workspace: Workspa
 
       qaLog.info("QA review starting", { deployedUrl, maxIterations });
 
+      let tokenUsage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+
       // Real problems found during investigation, kept so that even if the QA
       // agent runs out of budget before formally concluding, the builder still
       // receives specific, actionable findings instead of a vague "no verdict"
@@ -208,6 +232,7 @@ export function createQaAgent(config: AppConfig, log: Logger, workspace: Workspa
 
         qaLog.info(`QA iteration ${iteration}/${maxIterations}`);
         const completion = await llm.chat(messages, toolSpecs);
+        tokenUsage = addUsage(tokenUsage, extractUsage(completion));
         const choice = completion.choices[0];
         const message = choice.message;
         messages.push(message);
@@ -217,8 +242,8 @@ export function createQaAgent(config: AppConfig, log: Logger, workspace: Workspa
           const text = typeof message.content === "string" ? message.content : "";
           const verdictMatch = text.match(/VERDICT:\s*(PASS|FAIL)/i);
           const passed = verdictMatch ? verdictMatch[1].toUpperCase() === "PASS" : false;
-          qaLog.info("QA review finished", { passed });
-          const output: QaReviewOutput = { report: text || "(QA agent gave no report text)" };
+          qaLog.info("QA review finished", { passed, tokenUsage });
+          const output: QaReviewOutput = { report: text || "(QA agent gave no report text)", tokenUsage };
           return { ok: passed, data: output };
         }
 
@@ -250,6 +275,7 @@ export function createQaAgent(config: AppConfig, log: Logger, workspace: Workspa
 
       qaLog.warn("QA review hit its iteration budget without reaching a verdict - treating as FAIL", {
         observedFailureCount: observedFailures.length,
+        tokenUsage,
       });
 
       const fallbackReport =
@@ -262,7 +288,7 @@ export function createQaAgent(config: AppConfig, log: Logger, workspace: Workspa
             `command failures were observed during its investigation - treated as FAIL out of ` +
             `caution since a review that could not conclude cannot be trusted as a genuine pass.`;
 
-      const output: QaReviewOutput = { report: fallbackReport };
+      const output: QaReviewOutput = { report: fallbackReport, tokenUsage };
       return { ok: false, data: output };
     },
   };
