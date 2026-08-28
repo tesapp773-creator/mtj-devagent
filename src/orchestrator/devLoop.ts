@@ -185,7 +185,8 @@ const POST_DEPLOY_SETTLE_MS = 10_000;
 // have a legitimate reason to retry (e.g. a flaky command).
 const STUCK_LOOP_THRESHOLD = 3;
 
-function extractUsage(completion: { usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } }): TokenUsage {
+/** Exported for unit testing - pulls token counts out of a raw completion response. */
+export function extractUsage(completion: { usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } }): TokenUsage {
   const usage = completion.usage;
   return {
     promptTokens: usage?.prompt_tokens ?? 0,
@@ -194,7 +195,8 @@ function extractUsage(completion: { usage?: { prompt_tokens?: number; completion
   };
 }
 
-function addUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
+/** Exported for unit testing - combines two token usage totals. */
+export function addUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
   return {
     promptTokens: a.promptTokens + b.promptTokens,
     completionTokens: a.completionTokens + b.completionTokens,
@@ -202,11 +204,11 @@ function addUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
   };
 }
 
-/** A signature identifying "the same failure" for stuck-loop detection: the exact
- * command plus the start of its error message. Two failures with the same
- * signature in a row strongly suggest a fix attempt didn't actually change
- * anything. */
-function failureSignature(result: ToolResult): string {
+/** Exported for unit testing - a signature identifying "the same failure" for
+ * stuck-loop detection: the exact command plus the start of its error message.
+ * Two failures with the same signature in a row strongly suggest a fix attempt
+ * didn't actually change anything. */
+export function failureSignature(result: ToolResult): string {
   const data = result.data as { command?: string } | undefined;
   return `${data?.command ?? "?"}::${(result.error ?? "").slice(0, 150)}`;
 }
